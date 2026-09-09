@@ -1,0 +1,15 @@
+# examples/demo.txt - run with:  python -m fantasy_terminal --script examples/demo.txt
+# Lines starting with # are ignored.  Each other line is typed into the terminal.
+WEEK 3
+IMPACT trent williams -9
+NEWS ADD trent williams RELEASED --note "cap casualty"
+EXPLAIN brock purdy
+NEWS ADD tee higgins SIGNED NYJ --depth 1 --note "4yr deal"
+NEWS ADD mahomes OUT --weeks 3 --note "ankle"
+NEWS ADD "BUF OFF" WEATHER 4 --weeks 12 --note "snow game"
+TICKER
+PLAYER justin fields
+TEAM SF
+NEWS LIST
+NEWS UNDO
+SOS QB
