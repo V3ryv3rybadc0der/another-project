@@ -68,7 +68,9 @@ python3 -m fantasy_terminal --no-color TEAM KC    # plain text (also: NO_COLOR=1
 python3 -m unittest discover -s tests -v          # run the tests
 ```
 
-Python 3.8+ and nothing else.
+Python 3.8+ and nothing else. The optional AI headline reader needs
+`pip install anthropic`; everything else, live injury data included, runs on
+the standard library.
 
 ---
 
@@ -97,6 +99,8 @@ Python 3.8+ and nothing else.
 | `SET MAX_DEPTH 6` / `SET MIN_DELTA 0.01` / `SET DAMPING 0.9` | Tune how far shocks travel. |
 | `SAVE [file]` / `LOAD [file]` | Persist the news log + weight changes as JSON (default `data/session.json`). |
 | `RESET` | Back to the base projections. |
+| `FEED FETCH [--ai]` | Pull real NFL news into a review queue. Without `--ai` it reads the live injury report (free, no key). With `--ai` it also reads RSS headlines using Claude. |
+| `FEED LIST` / `APPLY <id\|ALL\|HIGH>` / `DROP <id>` / `SKIPPED` / `CLEAR` | Review the queue, then commit what you approve. Nothing is applied until you say so. |
 | `QUIT` | Leave. |
 
 Typing a bare menu number (`1`-`9`) jumps to that screen.  Names are fuzzy and case-insensitive: `PLAYER mahomes`, `NEWS ADD purdy OUT`.
@@ -131,7 +135,82 @@ NEWS ADD bijan robinson HYPE 2.5
 
 ---
 
-## 3. How the model works
+## 3. Pulling in real NFL news
+
+`FEED FETCH` pulls live news and turns it into proposed `NEWS ADD` commands.
+Nothing reaches the board until you approve it.
+
+```
+FFT> FEED FETCH                 live injury report (free, no API key)
+SLEEPER  138 injury designations  →  35 proposals, 103 skipped
+
+FFT> FEED LIST
+ID   CONF  VIA   PLAYER              TM   TYPE          HEADLINE
+#3   0.95  RULE  TreVeyon Henderson  NE   OUT           listed Out - Ankle
+#8   0.85  RULE  Patrick Mahomes     KC   QUESTIONABLE  listed Questionable - Knee
+...
+FFT> FEED APPLY 3               commit one
+FFT> FEED APPLY HIGH            commit everything at confidence >= 0.8
+FFT> FEED SKIPPED               see what it refused to map, and why
+```
+
+### The two paths, and why there are two
+
+| Path | Source | Needs | Handles |
+|---|---|---|---|
+| **Rule-based** (default) | [Sleeper API](https://api.sleeper.app/v1/players/nfl) | nothing - free, no key, no signup | Every injury designation in the league: Questionable, Doubtful, Out, IR, PUP, suspensions |
+| **AI** (`--ai`) | ESPN / Rotowire / CBS / Yahoo / PFT RSS | `pip install anthropic` + an API key | Free-text headlines: trades, releases, depth chart changes, role news |
+
+**Start with the rule-based path.** Sleeper publishes injury status as
+structured data (`"injury_status": "Questionable"`), so a lookup table is all
+it takes. No model, no cost, no chance of a hallucinated parse. That single
+source already covers most of what actually moves fantasy value.
+
+**The AI path earns its keep on free text.** A headline like *"Patriots RB
+Henderson out for Super Bowl rematch"* requires knowing that is TreVeyon
+Henderson, a running back on New England, and that "out for" means OUT in
+that week. A regex cannot do that; a language model can. The model is asked
+to return a fixed JSON shape (via structured outputs), so the reply is
+guaranteed to validate - there is no prose to parse. Set it up with:
+
+```bash
+pip install anthropic
+export ANTHROPIC_API_KEY=sk-ant-...     # or: ant auth login
+```
+
+Change the model in `config.py` → `INGEST["MODEL"]` (defaults to
+`claude-opus-5`; `claude-sonnet-5` or `claude-haiku-4-5` cost less). The
+roster list is sent as a cached prompt prefix, so repeat runs pay about a
+tenth as much for that part.
+
+### Three safety rules, and why each exists
+
+1. **Nothing is auto-applied.** Proposals sit in a queue until you type
+   `FEED APPLY`. A wrong entry silently corrupts every projection downstream
+   of it, and a wrong number you cannot see is worse than no number.
+   Override with `INGEST["AUTO_APPLY"]` only if you really mean it.
+2. **A name match needs team and position to agree.** `Josh Allen` is both a
+   Bills quarterback and a linebacker, and Sleeper lists both. When the feed
+   disagrees with the roster the item is skipped and shown in `FEED SKIPPED`,
+   never guessed at. Suffixes are normalized, so "Michael Penix" matches
+   "Michael Penix Jr.".
+3. **Low confidence is dropped.** Below `INGEST["MIN_CONFIDENCE"]` (0.5) a
+   proposal is discarded; below `AUTO_MIN_CONFIDENCE` (0.8) it is flagged
+   `CHECK` in the queue so you read the headline yourself.
+
+### Changing it
+
+| I want to... | Go to |
+|---|---|
+| add or remove a news source | `feeds.py` → `RSS_FEEDS` |
+| change what an injury tag means | `ingest.py` → `SLEEPER_STATUS_MAP` |
+| change the model, cost or confidence floors | `config.py` → `INGEST` |
+| change how headlines are interpreted | `ingest.py` → `SYSTEM_PROMPT` and `EXTRACTION_SCHEMA` |
+| re-download the injury file sooner | `feeds.py` → `CACHE_HOURS`, or `FEED FETCH --force` |
+
+---
+
+## 4. How the model works
 
 ### Nodes
 * **Players** `QB RB WR TE K` - value = projected fantasy points per game (PPR).
@@ -170,7 +249,7 @@ arrival is stored as a `Contribution` with its full path, which is what
 
 ---
 
-## 4. The data  (`data/*.csv` - edit in Excel or a text editor)
+## 5. The data  (`data/*.csv` - edit in Excel or a text editor)
 
 | File | Columns | Notes |
 |---|---|---|
@@ -187,7 +266,7 @@ they came from).  `python3 tools/make_sample_data.py` regenerates
 
 ---
 
-## 5. Changing the code
+## 6. Changing the code
 
 | I want to... | Go to |
 |---|---|
@@ -201,6 +280,8 @@ they came from).  `python3 tools/make_sample_data.py` regenerates
 | change colours / width / prompt / clear-screen | `config.py` → `DISPLAY`, `ui.py` → `THEME` |
 | change the screen layout (panels, columns, charts) | `terminal.py` → the `cmd_*` methods use `ui.panel`, `ui.columns`, `ui.bar`, `ui.dbar`, `ui.vchart` |
 | load data from somewhere else | `data_loader.py` |
+| change where live news comes from | `feeds.py` |
+| change how news is interpreted | `ingest.py` |
 
 Project layout:
 
@@ -211,6 +292,9 @@ tools/make_sample_data.py   regenerates the sample defenses + schedule
 tools/screenshot.py    renders a screen to HTML / PNG
 docs/screens/          the screenshots above
 examples/demo.txt      a script you can run with --script
+fantasy_terminal/feeds.py    downloads live NFL news (stdlib only)
+fantasy_terminal/ingest.py   turns news into proposed commands
 tests/test_graph.py    engine tests
+tests/test_ingest.py   news ingestion tests (offline)
 run.py                 launcher
 ```

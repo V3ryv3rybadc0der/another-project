@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 data/session.json
 *.egg-info/
+data/sleeper_players.json

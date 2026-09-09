@@ -173,6 +173,30 @@ DISPLAY = {
 }
 
 # ---------------------------------------------------------------------------
+# NEWS INGESTION (pulling real NFL news in - see feeds.py and ingest.py)
+# ---------------------------------------------------------------------------
+INGEST = {
+    # Which Claude model reads the free-text headlines.  Only used by the
+    # optional AI path; the Sleeper injury path needs no model at all.
+    # Cheaper options: "claude-sonnet-5", "claude-haiku-4-5".
+    "MODEL": "claude-opus-5",
+
+    # Proposals below this confidence are thrown away rather than queued.
+    "MIN_CONFIDENCE": 0.5,
+
+    # Proposals below this are flagged in the review queue as "CHECK".
+    "AUTO_MIN_CONFIDENCE": 0.8,
+
+    # How many headlines to send to the model in one FEED FETCH.
+    # Each headline is one small API call, so this bounds the cost.
+    "MAX_HEADLINES": 25,
+
+    # Never apply proposals automatically.  Set True only if you really want
+    # the board to move without you reading the headline first.
+    "AUTO_APPLY": False,
+}
+
+# ---------------------------------------------------------------------------
 # FILE LOCATIONS
 # ---------------------------------------------------------------------------
 import os as _os

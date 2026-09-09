@@ -40,10 +40,12 @@ import shlex
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from .config import DISPLAY, FILES, STATS, WEIGHTS, PROPAGATION
+from .config import DISPLAY, FILES, INGEST, STATS, WEIGHTS, PROPAGATION
 from .data_loader import load_graph, slug
 from .models import Action, Node
 from .news import NEWS_TYPES
+from . import feeds
+from . import ingest
 from . import stats as S
 from . import ui
 from .ui import C
@@ -52,7 +54,7 @@ from .ui import C
 # The numbered function menu at the bottom of every screen.  Typing just the
 # number runs the command, like picking an item off a terminal menu.
 MENU = [("1", "HOME"), ("2", "TICKER"), ("3", "RANK ALL"), ("4", "RANK QB"), ("5", "RANK RB"),
-        ("6", "RANK WR"), ("7", "SOS"), ("8", "NEWS LIST"), ("9", "HELP")]
+        ("6", "RANK WR"), ("7", "SOS"), ("8", "NEWS LIST"), ("9", "FEED LIST"), ("0", "HELP")]
 
 
 class CommandError(Exception):
@@ -125,6 +127,11 @@ class Terminal:
         self.prop_overrides: Dict[str, float] = {}
         self.week = 1
         self.next_action_id = 1
+        # The news review queue: Proposals from feeds waiting for approval.
+        # Nothing here has touched the graph yet - see cmd_FEED.
+        self.proposals: List[ingest.Proposal] = []
+        self.skipped: List[dict] = []
+        self.next_proposal_id = 1
         self.graph = None
         self.rebuild()
 
@@ -770,6 +777,134 @@ class Terminal:
                [C.dim("no season-level movement (weekly-only news shows on the week boards and PLAYER charts)")]
         return self.screen("NEWS ADD",
                            ui.panel(f"NEWS #{a.id} APPLIED: {ntype} {node.name}  →  {len(moved)} nodes moved", body))
+
+    # ---------------- live news ingestion ------------------------------
+    def cmd_FEED(self, args, opts):
+        """FEED FETCH|LIST|APPLY|DROP|SKIPPED|CLEAR   pull real NFL news into a review queue"""
+        sub = args[0].upper() if args else "LIST"
+
+        # ---- FEED FETCH [--ai] [--force] -------------------------------
+        if sub == "FETCH":
+            use_ai = "ai" in opts
+            force = "force" in opts
+            lines, errors = [], []
+
+            # 1) Sleeper injury report - structured, free, no AI needed.
+            try:
+                injuries = feeds.fetch_sleeper_injuries(force=force)
+                props, skipped = ingest.match_sleeper_injuries(
+                    self.graph, injuries, self.week, self.next_proposal_id)
+                self.proposals.extend(props)
+                self.skipped.extend(skipped)
+                self.next_proposal_id += len(props)
+                lines.append(f"{C.amber('SLEEPER')}  {len(injuries)} injury designations  "
+                             f"→  {C.white(str(len(props)))} proposals, {len(skipped)} skipped")
+            except feeds.FeedError as e:
+                errors.append(f"Sleeper: {e}")
+
+            # 2) RSS headlines - free text, needs the AI reader to interpret.
+            if use_ai:
+                items, feed_errs = feeds.fetch_all_rss()
+                errors.extend(feed_errs)
+                roster = [n.name for n in self.graph.nodes.values()
+                          if n.pos not in ("OFF", "OLUNIT", "DST")]
+                results, ai_errs = ingest.extract_with_claude(
+                    items, roster, self.week, max_items=int(opts.get("max", INGEST["MAX_HEADLINES"])))
+                errors.extend(ai_errs)
+                props, skipped = ingest.ai_results_to_proposals(
+                    self.graph, results, self.week, self.next_proposal_id)
+                self.proposals.extend(props)
+                self.skipped.extend(skipped)
+                self.next_proposal_id += len(props)
+                lines.append(f"{C.amber('HEADLINES')}  {len(items)} stories read by AI  "
+                             f"→  {C.white(str(len(props)))} proposals, {len(skipped)} skipped")
+            else:
+                lines.append(C.dim("HEADLINES  skipped - add --ai to read RSS headlines with Claude"))
+
+            for e in errors:
+                lines.append(C.red("! " + str(e)[:110]))
+            lines.append("")
+            lines.append(C.dim(f"{len(self.proposals)} proposals in the queue.  "
+                               f"Nothing has changed yet - FEED LIST to review, FEED APPLY to commit."))
+            return self.screen("FEED FETCH", ui.panel("FETCHED LIVE NFL NEWS", lines))
+
+        # ---- FEED LIST -------------------------------------------------
+        if sub == "LIST":
+            pending = [p for p in self.proposals if not p.applied]
+            if not pending:
+                return self.screen("FEED", ui.panel("NEWS REVIEW QUEUE", [
+                    C.dim("queue is empty.  FEED FETCH pulls the live injury report."),
+                    C.dim("FEED FETCH --ai also reads RSS headlines with Claude.")]))
+            rows = []
+            for p in pending:
+                flag = C.green("OK") if p.confidence >= INGEST["AUTO_MIN_CONFIDENCE"] else C.amber("CHECK")
+                rows.append([C.amber(f"#{p.id}"), flag, f"{p.confidence:.2f}",
+                             C.dim(p.origin.upper()), C.white(p.node_name), p.team,
+                             p.news_type, C.dim(p.headline[:52])])
+            t = ui.table(["ID", "", "CONF", "VIA", "PLAYER", "TM", "TYPE", "HEADLINE"], rows)
+            return self.screen("FEED", ui.panel(f"NEWS REVIEW QUEUE - {len(pending)} pending", [
+                t, "",
+                C.dim("FEED APPLY ALL | FEED APPLY HIGH (conf >= "
+                      f"{INGEST['AUTO_MIN_CONFIDENCE']}) | FEED APPLY 3 | FEED DROP 3 | FEED SKIPPED")]))
+
+        # ---- FEED APPLY <id|ALL|HIGH> ----------------------------------
+        if sub == "APPLY":
+            target = (args[1].upper() if len(args) > 1 else "").strip()
+            pending = [p for p in self.proposals if not p.applied]
+            if not target:
+                raise CommandError("FEED APPLY ALL | HIGH | <id>")
+            if target == "ALL":
+                chosen = pending
+            elif target == "HIGH":
+                chosen = [p for p in pending if p.confidence >= INGEST["AUTO_MIN_CONFIDENCE"]]
+            else:
+                chosen = [p for p in pending if str(p.id) == target]
+                if not chosen:
+                    raise CommandError(f"no pending proposal #{target}")
+            if not chosen:
+                raise CommandError("nothing to apply")
+            rows = []
+            for p in chosen:
+                # Run the proposal's command through the normal command path,
+                # so a fed-in item is indistinguishable from one you typed.
+                out = self.run_line(p.command)
+                ok = "error" not in ui.strip(out).lower()[:60]
+                p.applied = ok
+                rows.append([C.amber(f"#{p.id}"), C.green("APPLIED") if ok else C.red("FAILED"),
+                             C.white(p.node_name), p.news_type, C.dim(p.command[:66])])
+            return self.screen("FEED APPLY", ui.panel(
+                f"APPLIED {sum(1 for p in chosen if p.applied)} OF {len(chosen)} PROPOSALS",
+                [ui.table(["ID", "STATUS", "PLAYER", "TYPE", "COMMAND"], rows), "",
+                 C.dim("TICKER shows what moved.  NEWS UNDO reverses the last one.")]))
+
+        # ---- FEED DROP <id> --------------------------------------------
+        if sub == "DROP":
+            if len(args) < 2:
+                raise CommandError("FEED DROP <id>")
+            before = len(self.proposals)
+            self.proposals = [p for p in self.proposals if str(p.id) != args[1]]
+            if len(self.proposals) == before:
+                raise CommandError(f"no proposal #{args[1]}")
+            return C.amber(f"dropped proposal #{args[1]}")
+
+        # ---- FEED SKIPPED ----------------------------------------------
+        if sub == "SKIPPED":
+            if not self.skipped:
+                return C.dim("nothing was skipped")
+            rows = [[C.white(s.get("name", "?")), s.get("team", ""), s.get("pos", ""),
+                     s.get("status", ""), C.dim(s.get("why", ""))] for s in self.skipped[:40]]
+            return self.screen("FEED SKIPPED", ui.panel(
+                f"SKIPPED - {len(self.skipped)} items the feed could not safely map",
+                [ui.table(["NAME", "TM", "POS", "STATUS", "WHY"], rows), "",
+                 C.dim("'not on our roster' just means the player is not in data/players.csv.")]))
+
+        # ---- FEED CLEAR ------------------------------------------------
+        if sub == "CLEAR":
+            n = len(self.proposals)
+            self.proposals, self.skipped = [], []
+            return C.amber(f"cleared {n} proposals (applied news is untouched - use NEWS UNDO for that)")
+
+        raise CommandError("FEED FETCH [--ai] [--force] | LIST | APPLY <id|ALL|HIGH> | DROP <id> | SKIPPED | CLEAR")
 
     # ---------------- graph editing ------------------------------------
     def cmd_ADD(self, args, opts):
