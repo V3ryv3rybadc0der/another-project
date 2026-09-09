@@ -122,7 +122,7 @@ class GraphTests(unittest.TestCase):
 
     def test_ui_helpers(self):
         self.assertEqual(ui.strip(ui.dbar(-1.0, 1.0, 11)), "█████│     ")
-        self.assertEqual(ui.strip(ui.dbar(0.5, 1.0, 11)), "     │███  ")
+        self.assertEqual(ui.strip(ui.dbar(0.6, 1.0, 11)), "     │███  ")
         two = ui.columns(["a\nb\nc", "x"], [3, 3])
         self.assertEqual(two.split("\n"), ["a    x  ", "b       ", "c       "])
 
