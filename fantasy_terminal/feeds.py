@@ -30,7 +30,9 @@ function that returns a list of dicts and wire it into ingest.py.
 
 import json
 import os
+import shutil
 import ssl
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -73,15 +75,42 @@ class FeedError(Exception):
 def _get(url: str, timeout: int = TIMEOUT) -> bytes:
     """Download a URL and return the raw bytes.
 
-    Honours the HTTPS_PROXY / http_proxy environment variables automatically
-    (urllib does this for us), which matters in sandboxed environments.
+    Tries Python's own HTTP client first.  Some sports sites (ESPN in
+    particular) sit behind a CDN that rejects Python's TLS handshake with a
+    403 no matter what headers you send, so if that happens we retry with
+    `curl`, which is present on essentially every Mac and Linux box and
+    honours the same proxy environment variables.
+
+    Raises FeedError if both routes fail.
     """
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    req = urllib.request.Request(url, headers={
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json, text/xml, text/html, */*",
+    })
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read()
-    except (urllib.error.URLError, urllib.error.HTTPError, ssl.SSLError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, urllib.error.HTTPError, ssl.SSLError,
+            TimeoutError, OSError) as e:
+        body = _curl(url, timeout)
+        if body is not None:
+            return body
         raise FeedError(f"could not fetch {url}: {e}") from e
+
+
+def _curl(url: str, timeout: int = TIMEOUT) -> Optional[bytes]:
+    """Fallback transport.  Returns None if curl is missing or fails."""
+    curl = shutil.which("curl")
+    if not curl:
+        return None
+    try:
+        p = subprocess.run(
+            [curl, "-sS", "--fail", "--location", "--max-time", str(timeout),
+             "-A", USER_AGENT, url],
+            capture_output=True, timeout=timeout + 10)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return p.stdout if p.returncode == 0 and p.stdout else None
 
 
 # ---------------------------------------------------------------------------

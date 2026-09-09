@@ -101,6 +101,12 @@ the standard library.
 | `RESET` | Back to the base projections. |
 | `FEED FETCH [--ai]` | Pull real NFL news into a review queue. Without `--ai` it reads the live injury report (free, no key). With `--ai` it also reads RSS headlines using Claude. |
 | `FEED LIST` / `APPLY <id\|ALL\|HIGH>` / `DROP <id>` / `SKIPPED` / `CLEAR` | Review the queue, then commit what you approve. Nothing is applied until you say so. |
+| `ROSTER NEW <name>` / `ADD` / `DROP` / `DEL` | Set up your team, your opponent, a trade partner. |
+| `ROSTER` / `ROSTER <name>` (`MY`) | All your rosters, or one team's best legal lineup with bench. |
+| `MATCHUP <a> <b>` (`VS`) | Head to head, slot by slot, with the margin and the biggest swing. |
+| `TRADE <a> <players> FOR <b> <players>` | Price a swap for both sides. Nothing moves. |
+| `SCORES [--date YYYYMMDD]` | Every NFL game and its score. |
+| `RECAP <team> [--date] [--ai]` | What happened in a finished game and what it means. |
 | `QUIT` | Leave. |
 
 Typing a bare menu number (`1`-`9`) jumps to that screen.  Names are fuzzy and case-insensitive: `PLAYER mahomes`, `NEWS ADD purdy OUT`.
@@ -210,7 +216,101 @@ tenth as much for that part.
 
 ---
 
-## 4. How the model works
+## 4. Your league: rosters, matchups and trades
+
+The rest of the terminal is about the whole NFL. This part is about who owns
+whom in *your* league.
+
+```
+ROSTER NEW MYTEAM --owner "me"
+ROSTER ADD MYTEAM josh allen, jahmyr gibbs, ja'marr chase, puka nacua, trey mcbride
+ROSTER NEW DAVE --owner "Dave"
+ROSTER ADD DAVE lamar jackson, christian mccaffrey, justin jefferson, george kittle
+
+ROSTER MYTEAM               your best legal lineup for the week, plus bench
+MATCHUP MYTEAM DAVE         head to head, slot by slot
+TRADE MYTEAM drake london FOR DAVE saquon barkley
+```
+
+Name them whatever you like: `MYTEAM`, `OPPONENT`, `DAVE`, `TRADE_TARGET`.
+Rosters are saved and restored by `SAVE` / `LOAD` along with the news log.
+
+**Lineups, not piles of players.** A roster total on its own is meaningless
+because you cannot start six running backs. The terminal picks the
+highest-scoring *legal* lineup out of each roster, filling fixed slots first
+and giving `FLEX` the best player left over. Set your league's slots in
+`config.py` → `LINEUP`:
+
+```python
+LINEUP = {
+    "SLOTS": {"QB": 1, "RB": 2, "WR": 3, "TE": 1, "FLEX": 1, "K": 1, "DST": 1},
+    "FLEX_POSITIONS": ("RB", "WR", "TE"),   # add "QB" for superflex
+}
+```
+
+A player on his bye is worth 0 and drops out of the lineup automatically.
+
+**A matchup shows where the week is won.** Every slot is compared, the margin
+is totalled, and the biggest single swing is called out:
+
+```
+QB    Josh Allen      25.9  ◀  23.1  Lamar Jackson        +2.79
+RB    Jahmyr Gibbs    21.1  =  21.3  Christian McCaffrey  -0.19
+...
+FLEX  Breece Hall     14.8  ▶  17.9  Saquon Barkley       -3.11
+biggest swing: WR (Drake London vs Mike Evans) worth 3.8
+```
+
+**Trades are priced, not executed.** `TRADE` builds throwaway copies of both
+rosters, re-picks both lineups, and reports what each side gains or loses.
+Nobody actually moves. Because lineups have slots, a trade genuinely can
+improve both teams, and the screen says so when it does.
+
+**Rosters make news personal.** Once a roster exists, a recap flags which of
+your teams owned each player, so you can see at a glance whether a result or
+an injury landed on you or on your opponent.
+
+---
+
+## 5. After the games: recaps
+
+Lineups lock before kickoff, so this reads a game *afterwards* and tells you
+what happened.
+
+```
+SCORES                          every game and its score
+SCORES --date 20260104          a past Sunday
+RECAP KC                        what happened, and what it means
+RECAP KC --date 20260104 --ai   the same, plus a written recap
+```
+
+A recap gives you four things, all from real data:
+
+1. **The result and the flow** - final score, and whether the game script was
+   neutral, comfortable or a blowout, since that changes how the losing team
+   played.
+2. **How it was scored** - every touchdown and field goal in order, with the
+   running score.
+3. **Fantasy production** - real points computed from real stats, next to what
+   the player was projected for. This is where the day's story lives: a
+   `-13.7` against projection is a bust, a `+6.8` is a league-winner.
+4. **Injuries that happened in the game** - pulled out of the play text, with
+   the graph's answer to "who gains if he misses time".
+
+Nothing from a recap is applied to the board automatically. Injuries you see
+there are usually picked up by `FEED FETCH` the next day anyway, once the
+official designation lands.
+
+Scoring rules live in `config.py` → `SCORING` (full PPR by default; set
+`REC` to `0.5` for half PPR or `0` for standard).
+
+`--ai` asks Claude to write the game up in prose from the facts already
+parsed, so it is writing rather than guessing. It needs `pip install
+anthropic` and a key, same as the headline reader.
+
+---
+
+## 6. How the model works
 
 ### Nodes
 * **Players** `QB RB WR TE K` - value = projected fantasy points per game (PPR).
@@ -249,7 +349,7 @@ arrival is stored as a `Contribution` with its full path, which is what
 
 ---
 
-## 5. The data  (`data/*.csv` - edit in Excel or a text editor)
+## 7. The data  (`data/*.csv` - edit in Excel or a text editor)
 
 | File | Columns | Notes |
 |---|---|---|
@@ -266,7 +366,7 @@ they came from).  `python3 tools/make_sample_data.py` regenerates
 
 ---
 
-## 6. Changing the code
+## 8. Changing the code
 
 | I want to... | Go to |
 |---|---|
@@ -282,6 +382,9 @@ they came from).  `python3 tools/make_sample_data.py` regenerates
 | load data from somewhere else | `data_loader.py` |
 | change where live news comes from | `feeds.py` |
 | change how news is interpreted | `ingest.py` |
+| change your league's starting slots | `config.py` → `LINEUP` |
+| change fantasy scoring (PPR vs standard) | `config.py` → `SCORING` |
+| change how a recap reads a game | `games.py` |
 
 Project layout:
 
@@ -294,7 +397,10 @@ docs/screens/          the screenshots above
 examples/demo.txt      a script you can run with --script
 fantasy_terminal/feeds.py    downloads live NFL news (stdlib only)
 fantasy_terminal/ingest.py   turns news into proposed commands
+fantasy_terminal/games.py    game results, box scores and recaps
+fantasy_terminal/rosters.py  your league: lineups, matchups, trades
 tests/test_graph.py    engine tests
 tests/test_ingest.py   news ingestion tests (offline)
+tests/test_rosters.py  roster, matchup, trade and recap tests (offline)
 run.py                 launcher
 ```

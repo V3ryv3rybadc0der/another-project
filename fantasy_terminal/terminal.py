@@ -36,16 +36,20 @@ Command grammar:
 
 import json
 import os
+import re
 import shlex
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from .config import DISPLAY, FILES, INGEST, STATS, WEIGHTS, PROPAGATION
+from .config import DISPLAY, FILES, GAMES, INGEST, LINEUP, STATS, WEIGHTS, PROPAGATION
 from .data_loader import load_graph, slug
 from .models import Action, Node
 from .news import NEWS_TYPES
 from . import feeds
 from . import ingest
+from . import games as gamesmod
+from . import rosters as rostermod
 from . import stats as S
 from . import ui
 from .ui import C
@@ -54,7 +58,7 @@ from .ui import C
 # The numbered function menu at the bottom of every screen.  Typing just the
 # number runs the command, like picking an item off a terminal menu.
 MENU = [("1", "HOME"), ("2", "TICKER"), ("3", "RANK ALL"), ("4", "RANK QB"), ("5", "RANK RB"),
-        ("6", "RANK WR"), ("7", "SOS"), ("8", "NEWS LIST"), ("9", "FEED LIST"), ("0", "HELP")]
+        ("6", "RANK WR"), ("7", "SOS"), ("8", "NEWS LIST"), ("9", "FEED LIST"), ("0", "ROSTER")]
 
 
 class CommandError(Exception):
@@ -100,6 +104,19 @@ def parse_weeks(text: Optional[str]) -> List[int]:
     return sorted(set(out))
 
 
+# An apostrophe inside a word ("Ja'Marr", "D'Andre") is part of the name, not
+# a quote.  Shell-style splitting would choke on it, so we swap those for a
+# placeholder before splitting and swap them back afterwards.
+_APOS = "\x00APOS\x00"
+_INNER_APOS = re.compile(r"(?<=\w)['\u2019](?=\w)")
+
+
+def smart_split(line: str) -> List[str]:
+    """shlex.split, but tolerant of apostrophes inside player names."""
+    protected = _INNER_APOS.sub(_APOS, line)
+    return [t.replace(_APOS, "'") for t in shlex.split(protected)]
+
+
 def is_number(t: str) -> bool:
     try:
         float(t)
@@ -132,6 +149,9 @@ class Terminal:
         self.proposals: List[ingest.Proposal] = []
         self.skipped: List[dict] = []
         self.next_proposal_id = 1
+        # Your league: named rosters (MYTEAM, OPPONENT, a trade partner...).
+        # Saved and restored by SAVE / LOAD along with the news log.
+        self.rosters: Dict[str, rostermod.Roster] = {}
         self.graph = None
         self.rebuild()
 
@@ -230,13 +250,13 @@ class Terminal:
             if line == key:
                 line = command
         try:
-            tokens = shlex.split(line)
+            tokens = smart_split(line)
         except ValueError as e:
-            return C.red(f"parse error: {e}")
+            return C.red(f"parse error: {e}  (quote names with spaces, e.g. LINK \"A\" \"B\" 0.3)")
         cmd = tokens[0].upper()
         aliases = {"P": "PLAYER", "T": "TEAM", "MOV": "TICKER", "MOVERS": "TICKER", "Q": "QUIT",
                    "EXIT": "QUIT", "?": "HELP", "N": "NEWS", "R": "RANK", "X": "EXPLAIN",
-                   "WHATIF": "IMPACT", "SIM": "IMPACT", "H": "HOME", "MON": "HOME", "DASH": "HOME"}
+                   "WHATIF": "IMPACT", "SIM": "IMPACT", "MY": "ROSTER", "VS": "MATCHUP", "H": "HOME", "MON": "HOME", "DASH": "HOME"}
         cmd = aliases.get(cmd, cmd)
         fn = getattr(self, f"cmd_{cmd}", None)
         if fn is None:
@@ -778,6 +798,389 @@ class Terminal:
         return self.screen("NEWS ADD",
                            ui.panel(f"NEWS #{a.id} APPLIED: {ntype} {node.name}  →  {len(moved)} nodes moved", body))
 
+    # ---------------- post-game recaps ---------------------------------
+    def _find_game(self, want: str, date: Optional[str] = None):
+        """Find a game by team abbreviation or ESPN id."""
+        try:
+            games = gamesmod.fetch_scoreboard(date)
+        except feeds.FeedError as e:
+            raise CommandError(str(e))
+        for g in games:
+            if want.upper() in (g.home, g.away, g.id):
+                return g
+        raise CommandError(f"no game for '{want}'" + (f" on {date}" if date else " today"))
+
+    def cmd_SCORES(self, args, opts):
+        """SCORES [--date YYYYMMDD]      every NFL game and its score"""
+        try:
+            games = gamesmod.fetch_scoreboard(opts.get("date"))
+        except feeds.FeedError as e:
+            raise CommandError(str(e))
+        rows = []
+        for gm in games:
+            state = (C.green("LIVE") if gm.is_live else
+                     C.white("FINAL") if gm.state == "post" else C.dim("UPCOMING"))
+            rows.append([state, C.white(gm.away), f"{gm.away_score}", C.dim("@"),
+                         C.white(gm.home), f"{gm.home_score}", C.dim(gm.detail[:30])])
+        t = ui.table(["", "AWAY", "", "", "HOME", "", "WHEN"], rows,
+                     ["<", "<", ">", "<", "<", ">", "<"])
+        done = sum(1 for g in games if g.state == "post")
+        return self.screen("SCORES", ui.panel(
+            f"NFL SCOREBOARD - {done} of {len(games)} final",
+            [t, "", C.dim("RECAP <team> tells you what happened in a finished game.")]))
+
+    def cmd_RECAP(self, args, opts):
+        """RECAP <team> [--date YYYYMMDD] [--ai]   what happened in a game and what it means"""
+        if not args:
+            raise CommandError("RECAP <team>   e.g. RECAP KC --date 20260104")
+        game = self._find_game(args[0], opts.get("date"))
+        if game.state == "pre":
+            raise CommandError(f"{game.label} has not been played yet ({game.detail})")
+        try:
+            summary = gamesmod.fetch_summary(game.id)
+        except feeds.FeedError as e:
+            raise CommandError(str(e))
+        r = gamesmod.build_recap(summary, game)
+        g = self.graph
+        week = self.week
+
+        # --- headline block
+        head = [
+            ui.kv("RESULT", C.white(r.headline)) + "     " +
+            ui.kv("STATUS", C.white(r.game.detail or r.game.state.upper())),
+            ui.kv("FLOW", C.dim(gamesmod.script_summary(r.game))),
+            ui.kv("PLAYS", f"{r.total_plays}") + "     " +
+            ui.kv("SCORES", f"{len(r.scoring)}") + "     " +
+            ui.kv("INJURIES", (C.red(str(len(r.injuries))) if r.injuries else "0")),
+        ]
+
+        # --- how it was scored
+        srows = []
+        for sp in r.scoring[:GAMES["RECAP_SCORES"]]:
+            srows.append([C.dim(f"Q{sp['period']} {sp['clock']:>5}"), C.white(sp["team"]),
+                          C.dim(sp["type"][:20]), sp["text"][:74],
+                          C.dim(f"{sp['away_score']}-{sp['home_score']}")])
+        scoring_panel = ui.panel("HOW IT WAS SCORED", [
+            ui.table(["WHEN", "TM", "TYPE", "PLAY", "SCORE"], srows) if srows
+            else C.dim("no scoring plays recorded")])
+
+        # --- fantasy production, ours flagged
+        prows = []
+        for (name, team), rec in r.top_scorers(GAMES["RECAP_PLAYERS"]):
+            node, _why = ingest.resolve_player(g, name, team)
+            owned = rostermod.owners_of(self.rosters, node.id) if node else []
+            pre = node.base_value if node else None
+            actual = rec["points"]
+            vs = (actual - pre) if pre is not None else None
+            prows.append([
+                C.white(name[:22]), team,
+                node.slot if node else C.dim("-"),
+                f"{pre:.1f}" if pre is not None else C.dim("-"),
+                C.white(f"{actual:.1f}"),
+                ui.fmt_chg(vs) if vs is not None else C.dim("-"),
+                C.amber(",".join(owned)) if owned else "",
+                C.dim(rec["line"][:40]),
+            ])
+        prod_panel = ui.panel("FANTASY PRODUCTION  (real points from real stats)", [
+            ui.table(["PLAYER", "TM", "SLOT", "PROJ", "ACTUAL", "VS PROJ", "ROSTER", "STAT LINE"],
+                     prows, ["<", "<", "<", ">", ">", ">", "<", "<"]),
+            "", C.dim("PROJ is what we had him down for. VS PROJ is how the day actually went.")])
+
+        blocks = [ui.panel(f"RECAP - {r.game.label}", head), scoring_panel, prod_panel]
+
+        # --- injuries, and what they mean going forward
+        if r.injuries:
+            irows = []
+            for inj in r.injuries:
+                node = gamesmod.match_abbrev_name(g, inj["hint"], inj["team"])
+                who = C.white(node.name) if node else C.dim(inj["hint"] + " (not tracked)")
+                effect = ""
+                if node is not None and inj["kind"] == "INJURED":
+                    # Who benefits if he misses time?  Ask the graph.
+                    ripples = g.propagate(node.id, -node.base_value, None, 0, "if he misses time")
+                    gains = sorted(((c.path[-1], c.delta) for c in ripples if len(c.path) > 1),
+                                   key=lambda kv: -kv[1])[:2]
+                    if gains and gains[0][1] > 0.05:
+                        effect = "watch " + ", ".join(g.nodes[i].name for i, d in gains if d > 0.05)
+                irows.append([C.red("HURT") if inj["kind"] == "INJURED" else C.green("BACK"),
+                              C.dim(inj["when"]), inj["team"], who, C.dim(effect)])
+            blocks.append(ui.panel("INJURIES IN THIS GAME", [
+                ui.table(["", "WHEN", "TM", "PLAYER", "IF HE MISSES TIME"], irows), "",
+                C.dim("Nothing has been applied. Use NEWS ADD or FEED FETCH to put it on the board.")]))
+
+        # --- optional written recap
+        if "ai" in opts:
+            story, err = self._ai_recap(r)
+            blocks.append(ui.panel("WRITTEN RECAP",
+                                   [story] if story else [C.red(err or "no recap returned")]))
+
+        return self.screen(f"RECAP {r.game.label}", *blocks)
+
+    def _ai_recap(self, recap) -> Tuple[Optional[str], Optional[str]]:
+        """Ask Claude to write the game up in prose, from the facts we parsed.
+
+        Everything it is given is real - the score, the scoring plays, the
+        stat lines - so it is writing, not guessing. Returns (text, error).
+        """
+        try:
+            import anthropic
+        except ImportError:
+            return None, "the 'anthropic' package is not installed - run: pip install anthropic"
+        try:
+            client = anthropic.Anthropic()
+        except Exception as e:
+            return None, f"no API key: {e}"
+        facts = {
+            "result": recap.headline,
+            "flow": gamesmod.script_summary(recap.game),
+            "scoring_plays": [f"Q{s['period']} {s['clock']} {s['team']}: {s['text']}"
+                              for s in recap.scoring],
+            "top_fantasy": [f"{n} ({t}) {v['points']:.1f} pts - {v['line']}"
+                            for (n, t), v in recap.top_scorers(10)],
+            "injuries": [f"{i['team']} {i['hint']} {i['kind'].lower()} at {i['when']}"
+                         for i in recap.injuries],
+        }
+        try:
+            resp = client.messages.create(
+                model=GAMES["RECAP_MODEL"],
+                max_tokens=1200,
+                system=("You write short fantasy football game recaps. Use ONLY the facts given. "
+                        "Three short paragraphs: what happened in the game, which fantasy players "
+                        "won and lost the day, and what to watch next week. Name players and "
+                        "numbers. No preamble, no headings, no speculation beyond the facts."),
+                output_config={"effort": "low"},
+                messages=[{"role": "user", "content": json.dumps(facts, indent=1)}],
+            )
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+        if getattr(resp, "stop_reason", None) == "refusal":
+            return None, "the model declined to write this recap"
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        # wrap to the screen width so the panel stays tidy
+        import textwrap
+        width = ui.width() - 4
+        out = []
+        for para in text.split("\n"):
+            out.extend(textwrap.wrap(para, width) or [""])
+        return "\n".join(out), None
+
+    # ---------------- your league: rosters -----------------------------
+    def _roster(self, name: str) -> rostermod.Roster:
+        key = name.strip().upper()
+        if key not in self.rosters:
+            raise CommandError(f"no roster '{key}' - ROSTER NEW {key} creates it")
+        return self.rosters[key]
+
+    def cmd_ROSTER(self, args, opts):
+        """ROSTER NEW|ADD|DROP|DEL|<name>   set up your team, your opponent, a trade partner"""
+        sub = args[0].upper() if args else "LIST"
+
+        if sub == "NEW":
+            if len(args) < 2:
+                raise CommandError('ROSTER NEW <name> [--owner "Dave"]')
+            key = args[1].upper()
+            if key in self.rosters:
+                raise CommandError(f"roster '{key}' already exists")
+            self.rosters[key] = rostermod.Roster(name=key, owner=opts.get("owner", ""))
+            return C.amber(f"created roster {key}" +
+                           (f" (owner {opts['owner']})" if opts.get("owner") else "") +
+                           f"  -  ROSTER ADD {key} <player> to fill it")
+
+        if sub == "ADD":
+            if len(args) < 3:
+                raise CommandError('ROSTER ADD <name> <player>[, <player>...]')
+            roster = self._roster(args[1])
+            # everything after the roster name, split on commas so you can
+            # paste a whole team in one line
+            blob = " ".join(args[2:])
+            added, failed = [], []
+            for chunk in blob.split(","):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                try:
+                    node = self.resolve(chunk)
+                except CommandError as e:
+                    failed.append(f"{chunk}: {e}")
+                    continue
+                if node.id in roster.player_ids:
+                    failed.append(f"{node.name}: already on {roster.name}")
+                    continue
+                roster.player_ids.append(node.id)
+                added.append(node)
+            lines = []
+            if added:
+                lines.append(C.green(f"added {len(added)}: ") +
+                             ", ".join(f"{n.name} ({n.team} {n.slot})" for n in added))
+            for f in failed:
+                lines.append(C.red("skipped " + f))
+            return "\n".join(lines) or C.dim("nothing added")
+
+        if sub == "DROP":
+            if len(args) < 3:
+                raise CommandError("ROSTER DROP <name> <player>")
+            roster = self._roster(args[1])
+            node = self.resolve(" ".join(args[2:]))
+            if node.id not in roster.player_ids:
+                raise CommandError(f"{node.name} is not on {roster.name}")
+            roster.player_ids.remove(node.id)
+            return C.amber(f"dropped {node.name} from {roster.name}")
+
+        if sub in ("DEL", "DELETE"):
+            if len(args) < 2:
+                raise CommandError("ROSTER DEL <name>")
+            key = args[1].upper()
+            if key not in self.rosters:
+                raise CommandError(f"no roster '{key}'")
+            del self.rosters[key]
+            return C.amber(f"deleted roster {key}")
+
+        if sub == "LIST" and len(args) < 2:
+            if not self.rosters:
+                return self.screen("ROSTER", ui.panel("YOUR LEAGUE", [
+                    C.dim("no rosters yet."),
+                    "",
+                    C.white('ROSTER NEW MYTEAM --owner "me"'),
+                    C.white('ROSTER ADD MYTEAM josh allen, jahmyr gibbs, ja\'marr chase'),
+                    C.white("ROSTER MYTEAM              see the lineup"),
+                    C.white("MATCHUP MYTEAM OPPONENT    head to head"),
+                    C.white("TRADE MYTEAM kelce FOR THEIRS gibbs"),
+                ]))
+            rows = []
+            for r in self.rosters.values():
+                starters, bench, total = rostermod.best_lineup(self.graph, r, self.week)
+                chg = rostermod.roster_change(self.graph, r, self.week)
+                rows.append([C.white(r.name), C.dim(r.owner or "-"), f"{len(r.player_ids)}",
+                             C.white(f"{total:.1f}"), ui.fmt_chg(chg),
+                             C.dim(", ".join(n.name for _s, n, _v in starters[:3] if n))])
+            return self.screen("ROSTER", ui.panel(
+                f"YOUR LEAGUE - week {self.week}",
+                [ui.table(["ROSTER", "OWNER", "PLAYERS", "PROJ", "NEWS CHG", "TOP STARTERS"], rows,
+                          ["<", "<", ">", ">", ">", "<"]), "",
+                 C.dim("ROSTER <name> for the lineup   MATCHUP <a> <b> for head to head")]))
+
+        # ---- ROSTER <name>: show one team's lineup -----------------------
+        name = args[1] if sub == "LIST" else args[0]
+        roster = self._roster(name)
+        starters, bench, total = rostermod.best_lineup(self.graph, roster, self.week)
+        srows = []
+        for slot, n, v in starters:
+            if n is None:
+                srows.append([C.amber(slot), C.red("(empty)"), "", "", "", "", ""])
+                continue
+            opp = S.opponent(self.graph, n, self.week)
+            team = self.graph.teams.get(n.team)
+            ha = "vs" if team and team.home.get(self.week) else "@"
+            srows.append([C.amber(slot), C.white(n.name), n.team, n.slot,
+                          f"{ha} {opp}" if opp else C.dim("BYE"),
+                          C.white(f"{v:.1f}"),
+                          ui.fmt_chg(S.week_change(n, self.week)),
+                          ui.fmt_chg(S.matchup_adjustment(self.graph, n, self.week)),
+                          C.red(n.status) if n.status != "ACTIVE" else ""])
+        brows = []
+        for n, v in bench:
+            brows.append([C.dim("BN"), n.name, n.team, n.slot, "",
+                          f"{v:.1f}", ui.fmt_chg(S.week_change(n, self.week)),
+                          ui.fmt_chg(S.matchup_adjustment(self.graph, n, self.week)),
+                          C.red(n.status) if n.status != "ACTIVE" else ""])
+        cols = ["SLOT", "PLAYER", "TM", "POS", "OPP", "PROJ", "NEWS", "MATCHUP", "STATUS"]
+        blocks = [ui.panel(
+            f"{roster.name}" + (f"  ({roster.owner})" if roster.owner else "") +
+            f"  -  WEEK {self.week} STARTERS: {total:.1f}",
+            [ui.table(cols, srows, ["<", "<", "<", "<", "<", ">", ">", ">", "<"])])]
+        if brows:
+            blocks.append(ui.panel("BENCH", [ui.table(cols, brows,
+                                                      ["<", "<", "<", "<", "<", ">", ">", ">", "<"])]))
+        return self.screen(f"ROSTER {roster.name}", *blocks)
+
+    def cmd_MATCHUP(self, args, opts):
+        """MATCHUP <a> <b> [--week N]    head to head between two rosters, slot by slot"""
+        if len(args) < 2:
+            raise CommandError("MATCHUP <a> <b>   e.g. MATCHUP MYTEAM OPPONENT")
+        week = int(opts.get("week", self.week))
+        a, b = self._roster(args[0]), self._roster(args[1])
+        c = rostermod.compare(self.graph, a, b, week)
+        rows = []
+        for row in c["rows"]:
+            an, bn = row["a"], row["b"]
+            edge = row["edge"]
+            rows.append([
+                C.amber(row["slot"]),
+                C.white(an.name[:20]) if an else C.dim("(empty)"),
+                f"{row['a_pts']:.1f}",
+                (C.green("◀") if edge > 0.5 else C.red("▶") if edge < -0.5 else C.dim("=")),
+                f"{row['b_pts']:.1f}",
+                C.white(bn.name[:20]) if bn else C.dim("(empty)"),
+                ui.fmt_chg(edge),
+            ])
+        margin = c["margin"]
+        verdict = (C.green(f"{a.name} favoured by {margin:.1f}") if margin > 0
+                   else C.red(f"{b.name} favoured by {abs(margin):.1f}") if margin < 0
+                   else C.dim("dead level"))
+        head = [ui.kv(a.name, C.white(f"{c['a_total']:.1f}")) + "     " +
+                ui.kv(b.name, C.white(f"{c['b_total']:.1f}")) + "     " +
+                ui.kv("MARGIN", verdict)]
+        t = ui.table(["SLOT", a.name[:20], "PTS", "", "PTS", b.name[:20], "EDGE"], rows,
+                     ["<", "<", ">", "^", "<", "<", ">"])
+        biggest = max(c["rows"], key=lambda r: abs(r["edge"]))
+        note = C.dim(f"biggest swing: {biggest['slot']} "
+                     f"({biggest['a'].name if biggest['a'] else '-'} vs "
+                     f"{biggest['b'].name if biggest['b'] else '-'}) "
+                     f"worth {abs(biggest['edge']):.1f}")
+        return self.screen(f"MATCHUP {a.name} v {b.name}",
+                           ui.panel(f"WEEK {week} HEAD TO HEAD", head + ["", t, "", note]))
+
+    def cmd_TRADE(self, args, opts):
+        """TRADE <a> <players> FOR <b> <players>   price a trade for both sides"""
+        upper = [a.upper() for a in args]
+        if "FOR" not in upper:
+            raise CommandError('TRADE MYTEAM "travis kelce" FOR THEIRS "jahmyr gibbs"')
+        i = upper.index("FOR")
+        left, right = args[:i], args[i + 1:]
+        if len(left) < 2 or len(right) < 2:
+            raise CommandError("each side needs a roster name and at least one player")
+        a = self._roster(left[0])
+        b = self._roster(right[0])
+
+        def names_to_nodes(chunks, roster):
+            nodes = []
+            for chunk in " ".join(chunks).split(","):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                n = self.resolve(chunk)
+                if n.id not in roster.player_ids:
+                    raise CommandError(f"{n.name} is not on {roster.name}")
+                nodes.append(n)
+            return nodes
+
+        a_sends = names_to_nodes(left[1:], a)
+        b_sends = names_to_nodes(right[1:], b)
+        week = int(opts.get("week", self.week))
+        r = rostermod.evaluate_trade(self.graph, a, a_sends, b, b_sends, week)
+
+        rows = []
+        for side, sends, gets, before, after, delta in (
+                (a, a_sends, b_sends, r["a_before"], r["a_after"], r["a_delta"]),
+                (b, b_sends, a_sends, r["b_before"], r["b_after"], r["b_delta"])):
+            rows.append([
+                C.white(side.name),
+                C.red("- " + ", ".join(n.name for n in sends)),
+                C.green("+ " + ", ".join(n.name for n in gets)),
+                f"{before:.1f}", f"{after:.1f}", ui.fmt_chg(delta),
+                (C.green("BETTER") if delta > 0.2 else C.red("WORSE") if delta < -0.2 else C.dim("EVEN")),
+            ])
+        t = ui.table(["ROSTER", "GIVES", "GETS", "BEFORE", "AFTER", "CHANGE", "VERDICT"], rows,
+                     ["<", "<", "<", ">", ">", ">", "<"])
+        # a trade can help both sides, because lineups have slots
+        both = r["a_delta"] > 0.2 and r["b_delta"] > 0.2
+        note = (C.green("both sides improve their starting lineup - this is the rare fair trade")
+                if both else
+                C.dim("a trade can help both teams when it fills a slot each side was weak at"))
+        return self.screen("TRADE", ui.panel(
+            f"TRADE EVALUATION - WEEK {week} STARTING LINEUPS", [t, "", note, "",
+            C.dim("Nothing has been moved. This prices the swap only.")]))
+
     # ---------------- live news ingestion ------------------------------
     def cmd_FEED(self, args, opts):
         """FEED FETCH|LIST|APPLY|DROP|SKIPPED|CLEAR   pull real NFL news into a review queue"""
@@ -980,7 +1383,9 @@ class Terminal:
         """SAVE [file]                   write the news log + weight changes to JSON"""
         path = args[0] if args else FILES["default_save"]
         data = {"week": self.week, "weight_overrides": self.weight_overrides,
-                "prop_overrides": self.prop_overrides, "actions": [a.to_dict() for a in self.actions]}
+                "prop_overrides": self.prop_overrides,
+                "actions": [a.to_dict() for a in self.actions],
+                "rosters": {k: r.to_dict() for k, r in self.rosters.items()}}
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         return C.amber(f"saved {len(self.actions)} actions to {path}")
@@ -997,12 +1402,15 @@ class Terminal:
         self.prop_overrides = {k: float(v) for k, v in data.get("prop_overrides", {}).items()}
         self.actions = [Action.from_dict(d) for d in data.get("actions", [])]
         self.next_action_id = max([a.id for a in self.actions] + [0]) + 1
+        self.rosters = {k: rostermod.Roster.from_dict(v)
+                        for k, v in (data.get("rosters") or {}).items()}
         self.rebuild()
-        return C.amber(f"loaded {len(self.actions)} actions from {path}")
+        return C.amber(f"loaded {len(self.actions)} actions and "
+                       f"{len(self.rosters)} rosters from {path}")
 
     def cmd_RESET(self, args, opts):
         """RESET                         wipe news, links and weight changes"""
         self.actions, self.weight_overrides, self.prop_overrides = [], {}, {}
         self.next_action_id = 1
         self.rebuild()
-        return C.amber("reset to base projections")
+        return C.amber("reset to base projections (rosters kept - ROSTER DEL removes those)")

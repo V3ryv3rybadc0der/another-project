@@ -173,6 +173,65 @@ DISPLAY = {
 }
 
 # ---------------------------------------------------------------------------
+# FANTASY SCORING RULES (used to turn real in-game stats into real points)
+# ---------------------------------------------------------------------------
+# These are full PPR defaults.  For half PPR set REC to 0.5; for standard
+# set it to 0.  Everything else is the usual league default.
+SCORING = {
+    "PASS_YD": 0.04,      # 1 point per 25 passing yards
+    "PASS_TD": 4.0,
+    "INT": -2.0,
+    "RUSH_YD": 0.1,       # 1 point per 10 rushing yards
+    "RUSH_TD": 6.0,
+    "REC": 1.0,           # 1 point per catch (PPR).  0.5 = half PPR, 0 = standard
+    "REC_YD": 0.1,
+    "REC_TD": 6.0,
+    "FUMBLE_LOST": -2.0,
+    "FG": 3.0,            # simplified: every field goal is 3
+    "XP": 1.0,
+}
+
+# ---------------------------------------------------------------------------
+# YOUR LEAGUE'S LINEUP (see rosters.py)
+# ---------------------------------------------------------------------------
+# How many of each position you start.  Change these to match your league.
+# FLEX is filled LAST, from whatever is left in FLEX_POSITIONS.
+LINEUP = {
+    "SLOTS": {
+        "QB": 1,
+        "RB": 2,
+        "WR": 3,
+        "TE": 1,
+        "FLEX": 1,
+        "K": 1,
+        "DST": 1,
+    },
+    # Which positions may fill a FLEX slot.  Add "QB" for superflex leagues.
+    "FLEX_POSITIONS": ("RB", "WR", "TE"),
+}
+
+# ---------------------------------------------------------------------------
+# GAME RESULTS AND RECAPS (see games.py)
+# ---------------------------------------------------------------------------
+GAMES = {
+    # Network timeout for a single ESPN request.
+    "TIMEOUT": 25,
+
+    # A recap calls the game "comfortable" at this margin and a "blowout" at
+    # twice it.  That wording drives the game-script note in the recap.
+    "SCRIPT_MIN_MARGIN": 10,
+    "SCRIPT_MIN_PERIOD": 3,
+    "SCRIPT_MAGNITUDE": 1.5,
+
+    # How many players and scoring plays a recap lists before it stops.
+    "RECAP_PLAYERS": 12,
+    "RECAP_SCORES": 12,
+
+    # Which Claude model writes the prose recap when you pass --ai.
+    "RECAP_MODEL": "claude-opus-5",
+}
+
+# ---------------------------------------------------------------------------
 # NEWS INGESTION (pulling real NFL news in - see feeds.py and ingest.py)
 # ---------------------------------------------------------------------------
 INGEST = {
