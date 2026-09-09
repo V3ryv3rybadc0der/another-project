@@ -19,6 +19,43 @@ Trent Williams RELEASED (-9.0)
 Everything is commented so you can change it.  Start with
 `fantasy_terminal/config.py` - that is where every weight lives.
 
+## The look
+
+Black screen, amber labels, white values, green up / red down, a status bar
+and ticker strip on top of every screen, a numbered function menu at the
+bottom, and dense side-by-side panels - the finance-terminal style.
+
+**HOME** - movers, news feed, top plays this week, this week's games:
+
+![home](docs/screens/home.png)
+
+**PLAYER** - quote block, weekly projection chart, schedule, connections, and
+every news chain that reached the player:
+
+![player](docs/screens/player_justin_fields.png)
+
+**TICKER** - biggest movers with diverging bars:
+
+![ticker](docs/screens/ticker.png)
+
+**TEAM** - roster board and schedule difficulty:
+
+![team](docs/screens/team_sf.png)
+
+Style knobs (all in `fantasy_terminal/ui.py` → `THEME` and `config.py` → `DISPLAY`):
+
+| Setting | What it does |
+|---|---|
+| `THEME["amber"]`, `["green"]`, `["red"]`, `["navy"]` ... | 256-colour codes for each role |
+| `DISPLAY["WIDTH"]` | `"auto"` follows the window (min 100) or a fixed number; env `FFT_WIDTH=140` overrides |
+| `DISPLAY["CLEAR_SCREEN"]` | each command replaces the screen (True) or scrolls like a log (False) |
+| `DISPLAY["TICKER_CELLS"]` | how many names the top ticker strip shows |
+| `--no-color` / `NO_COLOR=1` | plain text |
+
+`python3 tools/screenshot.py out.html --quiet --script examples/demo.txt`
+renders any screen to HTML (and PNG when Chromium is installed) - that is how
+the images above were made.
+
 ---
 
 ## 1. Run it
@@ -39,6 +76,7 @@ Python 3.8+ and nothing else.
 
 | Command | What it does |
 |---|---|
+| `HOME` (`H`) | Dashboard: biggest movers, news feed, top plays by position, this week's games. Shown at startup. |
 | `TICKER [POS] [--week N]` | Biggest movers board: season projection, change, %, this week's projection. |
 | `RANK <POS\|ALL> [--week N]` | Rankings by projected points (QB RB WR TE K DST), with last year PPG and SOS. |
 | `PLAYER <name>` (`P`) | Quote screen: projection, base, change, this week's matchup, last season, full schedule with weekly projections, connections, and every news chain that touched him. Works on team nodes too: `PLAYER KC OFF`, `PLAYER KC DST`, `PLAYER KC OL`. |
@@ -61,7 +99,7 @@ Python 3.8+ and nothing else.
 | `RESET` | Back to the base projections. |
 | `QUIT` | Leave. |
 
-Names are fuzzy and case-insensitive: `PLAYER mahomes`, `NEWS ADD purdy OUT`.
+Typing a bare menu number (`1`-`9`) jumps to that screen.  Names are fuzzy and case-insensitive: `PLAYER mahomes`, `NEWS ADD purdy OUT`.
 Quote a name only when a command takes several names (`LINK "A" "B" 0.3`).
 
 ### News types  (`HELP NEWS`)
@@ -160,7 +198,8 @@ they came from).  `python3 tools/make_sample_data.py` regenerates
 | add a new news type | `news.py` - write a function, register it in `NEWS_TYPES` |
 | add a new command | `terminal.py` - add `def cmd_NAME(self, args, opts)`; HELP picks it up from the docstring |
 | add a new stat or ranking | `stats.py` |
-| change colours / width / prompt | `config.py` → `DISPLAY`, `ui.py` |
+| change colours / width / prompt / clear-screen | `config.py` → `DISPLAY`, `ui.py` → `THEME` |
+| change the screen layout (panels, columns, charts) | `terminal.py` → the `cmd_*` methods use `ui.panel`, `ui.columns`, `ui.bar`, `ui.dbar`, `ui.vchart` |
 | load data from somewhere else | `data_loader.py` |
 
 Project layout:
@@ -169,6 +208,8 @@ Project layout:
 fantasy_terminal/      the package (see __init__.py for a file-by-file map)
 data/                  CSV inputs + saved sessions
 tools/make_sample_data.py   regenerates the sample defenses + schedule
+tools/screenshot.py    renders a screen to HTML / PNG
+docs/screens/          the screenshots above
 examples/demo.txt      a script you can run with --script
 tests/test_graph.py    engine tests
 run.py                 launcher

@@ -7,11 +7,19 @@ cmd_<NAME>; `run_line()` looks the method up by the first word you type, so
 ADDING A COMMAND is:  write `def cmd_FOO(self, args, opts)` and it works.
 (HELP lists them automatically from the docstrings.)
 
+Every full screen is built with self.screen(function_name, *blocks), which
+adds the furniture a finance terminal has:
+
+    ┌ amber status bar   FFT  <FUNCTION>          WK 3  NEWS 4  13:59
+    │ ticker strip       J.ALLEN 24.0 ▲+0.0 │ L.JACKSON 23.0 ▲+0.0 │ ...
+    │ ...the screen body: sections, tables, charts, side-by-side panels...
+    └ menu bar           1) HOME  2) TICKER  3) RANK ALL ... Q) QUIT
+
 State kept by the terminal (this is what SAVE/LOAD writes to JSON):
     self.actions               the undo-able log of news / links / weight edits
     self.weight_overrides      SET WEIGHT changes
     self.prop_overrides        SET MAX_DEPTH / MIN_DELTA / DAMPING changes
-    self.week                  the "current week" used by TICKER / RANK
+    self.week                  the "current week" used by the boards
 
 UNDO works by rebuilding the graph from the CSVs and replaying the log minus
 the last entry - simple, and it means every number on screen is always the
@@ -23,6 +31,7 @@ Command grammar:
     single-name commands (PLAYER, EXPLAIN, EDGES, IMPACT, NEWS ADD) accept
     unquoted names:        PLAYER brock purdy
     options look like      --weeks 3     --weeks 1-4    --note "hamstring"
+    a bare number picks that item from the bottom menu
 """
 
 import json
@@ -38,6 +47,12 @@ from .news import NEWS_TYPES
 from . import stats as S
 from . import ui
 from .ui import C
+
+
+# The numbered function menu at the bottom of every screen.  Typing just the
+# number runs the command, like picking an item off a terminal menu.
+MENU = [("1", "HOME"), ("2", "TICKER"), ("3", "RANK ALL"), ("4", "RANK QB"), ("5", "RANK RB"),
+        ("6", "RANK WR"), ("7", "SOS"), ("8", "NEWS LIST"), ("9", "HELP")]
 
 
 class CommandError(Exception):
@@ -89,6 +104,14 @@ def is_number(t: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def short_name(n: Node) -> str:
+    """'Patrick Mahomes' -> 'P.MAHOMES' for the ticker strip."""
+    if n.is_scoring and " " in n.name and n.pos != "DST":
+        parts = n.name.split()
+        return (parts[0][0] + "." + parts[-1]).upper()
+    return n.name.upper()
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +175,7 @@ class Terminal:
             if p.get("team") in g.teams:
                 g.move_player(nid, p["team"], int(p.get("depth") or 1), f"#{a.id} ADD {p['name']}", event_id=a.id)
         elif a.kind == "WEIGHT":
-            # already applied through rebuild(); nothing to do live because
-            # cmd_SET calls rebuild() after storing the override
-            pass
+            pass   # weights are applied by rebuild() through weight_overrides
 
     # ------------------------------------------------------------------
     # lookups
@@ -198,6 +219,9 @@ class Terminal:
         line = line.strip()
         if not line or line.startswith("#"):
             return ""
+        for key, command in MENU:          # a bare menu number -> that command
+            if line == key:
+                line = command
         try:
             tokens = shlex.split(line)
         except ValueError as e:
@@ -205,7 +229,7 @@ class Terminal:
         cmd = tokens[0].upper()
         aliases = {"P": "PLAYER", "T": "TEAM", "MOV": "TICKER", "MOVERS": "TICKER", "Q": "QUIT",
                    "EXIT": "QUIT", "?": "HELP", "N": "NEWS", "R": "RANK", "X": "EXPLAIN",
-                   "WHATIF": "IMPACT", "SIM": "IMPACT"}
+                   "WHATIF": "IMPACT", "SIM": "IMPACT", "H": "HOME", "MON": "HOME", "DASH": "HOME"}
         cmd = aliases.get(cmd, cmd)
         fn = getattr(self, f"cmd_{cmd}", None)
         if fn is None:
@@ -218,15 +242,38 @@ class Terminal:
         except (KeyError, ValueError) as e:
             return C.red(f"error: {e}")
 
-    def banner(self) -> str:
-        n = len(self.actions)
-        return ui.header("FANTASY FOOTBALL TERMINAL",
-                         f"WEEK {self.week}   NEWS ITEMS {n}   {datetime.now().strftime('%H:%M')}   HELP for commands")
+    # ------------------------------------------------------------------
+    # screen furniture: status bar, ticker strip, menu
+    # ------------------------------------------------------------------
+    def status_bar(self, function: str) -> str:
+        """Amber bar: function name left, week / news count / clock right."""
+        return ui.header("FFT", function,
+                         f"WK {self.week}  NEWS {len(self.actions)}  {datetime.now().strftime('%H:%M')}")
+
+    def ticker_strip(self) -> str:
+        """One line of the biggest movers (or top projections when nothing moved)."""
+        g = self.graph
+        cells_n = int(DISPLAY.get("TICKER_CELLS", 12))
+        items = S.movers(g)[:cells_n]
+        if not items:
+            items = [(n, 0.0) for n, _ in S.rankings(g)[:cells_n]]
+        cells = [f"{C.amber(short_name(n)[:12])} {C.white(f'{S.projected_season(g, n):.1f}')} "
+                 f"{ui.arrow(chg)}{ui.fmt_chg(chg, 1)}" for n, chg in items]
+        return ui.ticker_strip(cells)
+
+    def menu_bar(self) -> str:
+        return ui.menu_bar([f"{k}) {v}" for k, v in MENU] + ["Q) QUIT"])
+
+    def screen(self, function: str, *blocks: str) -> str:
+        """Wrap content blocks in the standard screen: status bar, ticker, body, menu."""
+        body = "\n".join(b for b in blocks if b)
+        return ui.paint("\n".join([self.status_bar(function), self.ticker_strip(), ui.rule(), body,
+                                   self.menu_bar()]))
 
     def repl(self) -> None:
         """Interactive loop.  Ctrl-D or QUIT to leave."""
-        print(self.banner())
-        print(C.dim("Try:  TICKER   PLAYER mahomes   TEAM KC   NEWS ADD trent williams RELEASED   EXPLAIN purdy"))
+        clear = ui.CLEAR if DISPLAY.get("CLEAR_SCREEN", True) else ""
+        print(clear + self.cmd_HOME([], {}))
         while True:
             try:
                 line = input(C.amber(DISPLAY["PROMPT"]))
@@ -237,7 +284,10 @@ class Terminal:
             if out == "__QUIT__":
                 break
             if out:
-                print(out)
+                # full screens (built by self.screen) replace the display;
+                # one-line replies (errors, "saved", ...) stay inline
+                full = ui.strip(out).lstrip().startswith("FFT")
+                print((clear if full else "") + out)
 
     # ==================================================================
     # COMMANDS  (docstring first line = HELP text)
@@ -250,21 +300,97 @@ class Terminal:
         """HELP [NEWS|WEIGHTS]           this list / the news types / the weight keys"""
         if args and args[0].upper() == "NEWS":
             rows = [(C.white(k), v[1]) for k, v in NEWS_TYPES.items()]
-            lines = [ui.table(["TYPE", "WHAT IT DOES"], rows),
-                     "",
+            lines = [ui.table(["TYPE", "WHAT IT DOES"], rows), "",
                      C.dim("NEWS ADD <name> <TYPE> [magnitude | TEAM] [--weeks 3 | 1-4] [--depth N] [--value X] [--note \"...\"]"),
                      C.dim("Targets can be players or team nodes: 'KC OFF', 'KC DST', 'KC OL'")]
-            return ui.panel("NEWS TYPES", lines)
+            return self.screen("HELP NEWS", ui.panel("NEWS TYPES", lines))
         if args and args[0].upper() == "WEIGHTS":
             return self.cmd_WEIGHTS([], {})
         lines = []
         for name in sorted(dir(self)):
             if name.startswith("cmd_"):
                 doc = (getattr(self, name).__doc__ or "").strip().splitlines()[0]
-                lines.append(doc)
-        lines += ["", C.dim("Aliases: P=PLAYER T=TEAM MOV=TICKER R=RANK X=EXPLAIN SIM=IMPACT Q=QUIT"),
-                  C.dim("Options: --weeks 3 | --weeks 1-4 | --week 5 | --rows 30 | --note \"text\"")]
-        return ui.panel("COMMANDS", lines)
+                cmd, _, rest = doc.partition("  ")
+                lines.append(C.white(cmd) + "  " + rest.strip())
+        lines += ["", C.dim("Aliases: P=PLAYER T=TEAM MOV=TICKER R=RANK X=EXPLAIN SIM=IMPACT H=HOME Q=QUIT"),
+                  C.dim("Options: --weeks 3 | --weeks 1-4 | --week 5 | --rows 30 | --note \"text\""),
+                  C.dim("Type a menu number (1-9) to jump to that screen.")]
+        return self.screen("HELP", ui.panel("COMMANDS", lines))
+
+    # ---------------- HOME dashboard ------------------------------------
+    def cmd_HOME(self, args, opts):
+        """HOME                          dashboard: movers, news feed, top plays, week matchups"""
+        g = self.graph
+        week = self.week
+        w = ui.width()
+        left_w = (w - 2) // 2
+        right_w = w - 2 - left_w
+
+        # --- top-left: biggest movers
+        movers = S.movers(g)[:10]
+        if movers:
+            rows = [[ui.arrow(chg), C.white(n.name[:20]), n.team, n.slot, ui.fmt_num(S.projected_season(g, n)),
+                     ui.fmt_chg(chg), ui.pct(chg, n.base_value)] for n, chg in movers]
+            mv = ui.table(["", "NAME", "TM", "SLOT", "PROJ", "CHG", "CHG%"], rows,
+                          ["<", "<", "<", "<", ">", ">", ">"])
+        else:
+            mv = C.dim("board is flat - add news with NEWS ADD <name> <TYPE>")
+        movers_panel = ui.panel("BIGGEST MOVERS", [mv], left_w)
+
+        # --- top-right: news feed (latest first)
+        feed_rows = []
+        for a in reversed(self.actions[-10:]):
+            p = a.params
+            if a.kind == "NEWS":
+                item = f"{p['type']} {g.nodes[p['target']].name}"
+                if p.get("team"):
+                    item += f" → {p['team']}"
+                if p.get("weeks"):
+                    item += f" wk {','.join(map(str, p['weeks']))}"
+            else:
+                item = f"{a.kind} {json.dumps(p)[:40]}"
+            feed_rows.append([C.dim(a.stamp[-5:]), C.amber(f"#{a.id}"), C.white(item[:34]),
+                              C.dim((p.get("note") or "")[:right_w - 50])])
+        feed = ui.table(["TIME", "ID", "HEADLINE", "NOTE"], feed_rows) if feed_rows else \
+            C.dim("no headlines yet.  HELP NEWS lists the types.")
+        feed_panel = ui.panel("NEWS FEED", [feed], right_w)
+
+        # --- bottom-left: top plays this week, one per position, with bars
+        play_rows = []
+        overall = S.rankings(g, None, week)
+        vmax = overall[0][1] if overall else 1.0
+        for pos in ("QB", "RB", "WR", "TE", "K", "DST"):
+            top = S.rankings(g, pos, week)[:3]
+            for n, val in top:
+                opp = S.opponent(g, n, week) or ""
+                play_rows.append([C.amber(pos), C.white(n.name[:20]), n.team, opp, ui.fmt_num(val),
+                                  ui.bar(val, vmax, 12)])
+        plays = ui.table(["POS", f"WEEK {week} TOP PLAYS", "TM", "OPP", "PROJ", ""], play_rows,
+                         ["<", "<", "<", "<", ">", "<"])
+        plays_panel = ui.panel(f"WEEK {week} - TOP PLAYS BY POSITION", [plays], left_w)
+
+        # --- bottom-right: this week's games with offense ratings and DST projections
+        game_rows, seen = [], set()
+        for abbr, team in sorted(g.teams.items()):
+            opp = team.schedule.get(week)
+            if not opp or abbr in seen:
+                continue
+            seen.update({abbr, opp})
+            home, away = (abbr, opp) if team.home.get(week) else (opp, abbr)
+            ho, ao = g.nodes[g.teams[home].off_node_id], g.nodes[g.teams[away].off_node_id]
+            hd, ad = g.nodes.get(g.teams[home].dst_node_id), g.nodes.get(g.teams[away].dst_node_id)
+            game_rows.append([C.white(away), ui.fmt_num(S.projected_season(g, ao), 1),
+                              C.dim("@"), C.white(home), ui.fmt_num(S.projected_season(g, ho), 1),
+                              ui.fmt_num(S.projected_week(g, ad, week)) if ad else "",
+                              ui.fmt_num(S.projected_week(g, hd, week)) if hd else ""])
+        byes = ", ".join(a for a, t in sorted(g.teams.items()) if t.bye_week == week)
+        games = ui.table(["AWAY", "OFF", "", "HOME", "OFF", "AWAY DST", "HOME DST"], game_rows,
+                         ["<", ">", "<", "<", ">", ">", ">"])
+        games_panel = ui.panel(f"WEEK {week} - GAMES", [games, C.dim(f"BYE: {byes or 'none'}")], right_w)
+
+        top = ui.columns([movers_panel, feed_panel], [left_w, right_w])
+        bottom = ui.columns([plays_panel, games_panel], [left_w, right_w])
+        return self.screen("HOME", top, "", bottom)
 
     # ---------------- boards -------------------------------------------
     def cmd_TICKER(self, args, opts):
@@ -279,54 +405,59 @@ class Terminal:
             note = C.dim("board is flat - no news yet.  showing top projections.  NEWS ADD ... to move it")
         else:
             note = C.dim(f"{len(movers)} nodes moved by news.  EXPLAIN <name> shows why")
+        vmax = max(abs(chg) for _, chg in movers) or 1.0
         rows = []
         for n, chg in movers[:rows_n]:
             season = S.projected_season(g, n)
             wk = S.projected_week(g, n, week)
             rows.append([ui.arrow(chg), C.white(n.name), n.team, n.slot,
                          ui.fmt_num(season), ui.fmt_chg(chg), ui.pct(chg, n.base_value),
+                         ui.dbar(chg, vmax, 17),
                          ui.fmt_num(wk), ui.fmt_chg(S.week_change(n, week)),
                          C.dim(n.status if n.status != "ACTIVE" else "")])
-        t = ui.table(["", "NAME", "TM", "SLOT", "PROJ", "CHG", "CHG%", f"WK{week}", "WKCHG", "STATUS"],
-                     rows, ["<", "<", "<", "<", ">", ">", ">", ">", ">", "<"])
-        return "\n".join([self.banner(), ui.panel("TICKER - BIGGEST MOVERS", [t, note])])
+        t = ui.table(["", "NAME", "TM", "SLOT", "PROJ", "CHG", "CHG%", "", f"WK{week}", "WKCHG", "STATUS"],
+                     rows, ["<", "<", "<", "<", ">", ">", ">", "<", ">", ">", "<"])
+        return self.screen("TICKER", ui.panel("BIGGEST MOVERS" + (f" - {pos}" if pos else ""), [t, note]))
 
     def cmd_RANK(self, args, opts):
-        """RANK <POS|ALL> [--week N]     projections ranked (QB RB WR TE K DST)"""
+        """RANK <POS|ALL> [--week N]     projections ranked with bar chart (QB RB WR TE K DST)"""
         g = self.graph
         pos = args[0].upper() if args else "ALL"
         pos = None if pos == "ALL" else pos
         week = int(opts["week"]) if "week" in opts else None
         rows_n = int(opts.get("rows", DISPLAY["DEFAULT_ROWS"]))
         ranked = S.rankings(g, pos, week)
+        vmax = ranked[0][1] if ranked else 1.0
         rows = []
         for i, (n, val) in enumerate(ranked[:rows_n], start=1):
-            chg = (val - (S.projected_week(g, n, week) - S.week_change(n, week) - 0) if week else val - n.base_value) if False else \
-                  (S.week_change(n, week) if week else S.projected_season(g, n) - n.base_value)
+            chg = S.week_change(n, week) if week else S.projected_season(g, n) - n.base_value
             sos_score, sos_label = S.strength_of_schedule(g, n)
-            opp = S.opponent(g, n, week) if week else ""
-            rows.append([f"{i}", C.white(n.name), n.team, n.slot, ui.fmt_num(val), ui.fmt_chg(chg),
-                         ui.fmt_num(n.last_year_ppg), f"{sos_score:+.1f}% {sos_label}",
-                         (opp or "") if week else ""])
+            opp = (S.opponent(g, n, week) or "") if week else ""
+            rows.append([C.amber(f"{i}"), C.white(n.name), n.team, n.slot, ui.fmt_num(val), ui.bar(val, vmax, 24),
+                         ui.fmt_chg(chg), ui.fmt_num(n.last_year_ppg), f"{sos_score:+.1f}% {sos_label}", opp])
         title = f"RANK {pos or 'ALL'} - " + (f"WEEK {week}" if week else "SEASON PROJECTION")
-        t = ui.table(["#", "NAME", "TM", "SLOT", "PROJ", "CHG", "LY PPG", "SOS", "OPP" if week else ""],
-                     rows, ["<", "<", "<", "<", ">", ">", ">", "<", "<"])
-        return ui.panel(title, [t])
+        t = ui.table(["#", "NAME", "TM", "SLOT", "PROJ", "", "CHG", "LY PPG", "SOS", "OPP" if week else ""],
+                     rows, ["<", "<", "<", "<", ">", "<", ">", ">", "<", "<"])
+        return self.screen(f"RANK {pos or 'ALL'}", ui.panel(title, [t]))
 
     def cmd_SOS(self, args, opts):
         """SOS [POS]                     strength of schedule by team (default WR)"""
         pos = (args[0].upper() if args else "WR")
+        table_rows = S.sos_table(self.graph, pos)
+        vmax = max(abs(r[1]) for r in table_rows) or 1.0
         rows = []
-        for abbr, score, label in S.sos_table(self.graph, pos):
+        for abbr, score, label in table_rows:
             col = C.green if label == "EASY" else (C.red if label == "HARD" else C.dim)
-            rows.append([abbr, self.graph.teams[abbr].name, f"{score:+.1f}%", col(label),
+            rows.append([C.white(abbr), self.graph.teams[abbr].name, f"{score:+.1f}%",
+                         ui.dbar(score, vmax, 17), col(label),
                          f"WK {self.graph.teams[abbr].bye_week}"])
-        t = ui.table(["TM", "TEAM", "VS AVG", "RATING", "BYE"], rows, ["<", "<", ">", "<", "<"])
-        return ui.panel(f"STRENGTH OF SCHEDULE - {pos}  (+ = opponents allow more = easier)", [t])
+        t = ui.table(["TM", "TEAM", "VS AVG", "", "RATING", "BYE"], rows, ["<", "<", ">", "<", "<", "<"])
+        return self.screen(f"SOS {pos}",
+                           ui.panel(f"STRENGTH OF SCHEDULE - {pos}  (+ = opponents allow more = easier)", [t]))
 
     # ---------------- detail screens -------------------------------------
     def cmd_PLAYER(self, args, opts):
-        """PLAYER <name>                 full quote screen for a player / team node"""
+        """PLAYER <name>                 quote screen: projection, chart, schedule, connections, news"""
         g = self.graph
         n = self.resolve(" ".join(args))
         week = int(opts.get("week", self.week))
@@ -334,27 +465,44 @@ class Terminal:
         chg = season - n.base_value
         unit = "PPG" if n.is_scoring else "GRADE"
         team = g.teams.get(n.team)
-        status = n.status if n.status == "ACTIVE" else C.red(n.status)
-        # --- quote panel
-        q = [f"{C.dim('TEAM')} {n.team:<5} {C.dim('SLOT')} {n.slot:<6} {C.dim('STATUS')} {status}",
-             f"{C.dim('PROJ ' + unit)} {C.white(ui.fmt_num(season, 2)):<14} {C.dim('BASE')} {n.base_value:<8.2f} "
-             f"{C.dim('CHG')} {ui.fmt_chg(chg)}  {ui.pct(chg, n.base_value)}"]
+        status = C.green("ACTIVE") if n.status == "ACTIVE" else C.red(n.status)
+        w = ui.width()
+        left_w = (w - 2) // 2
+        right_w = w - 2 - left_w
+
+        # --- quote block: two label/value pairs per line (label amber, value white)
+        sep = "     "
+        q = [ui.kv("TEAM", C.white(n.team)) + sep + ui.kv("SLOT", C.white(n.slot)) + sep + ui.kv("STATUS", status),
+             ui.kv(f"PROJ {unit}", C.white(f"{season:.2f}")) + sep + ui.kv("BASE", f"{n.base_value:.2f}"),
+             ui.kv("CHG", ui.fmt_chg(chg)) + sep + ui.kv("CHG%", ui.pct(chg, n.base_value))]
         if team:
             wk_val = S.projected_week(g, n, week)
             opp = S.opponent(g, n, week)
             adj = S.matchup_adjustment(g, n, week) if opp else 0.0
             ha = "vs" if team.home.get(week) else "@"
-            q.append(f"{C.dim(f'WEEK {week}')} {C.white(ui.fmt_num(wk_val, 2)):<14} "
-                     f"{C.dim('OPP')} {(ha + ' ' + opp) if opp else 'BYE':<8} "
-                     f"{C.dim('MATCHUP')} {ui.fmt_chg(adj)}  {C.dim('NEWS')} {ui.fmt_chg(S.week_change(n, week))}")
+            q.append(ui.kv(f"WEEK {week}", ui.fmt_num(wk_val, 2)) + sep +
+                     ui.kv("OPP", C.white(f"{ha} {opp}") if opp else C.dim("BYE")))
+            q.append(ui.kv("MATCHUP", ui.fmt_chg(adj)) + sep + ui.kv("WK NEWS", ui.fmt_chg(S.week_change(n, week))))
         if n.is_scoring:
             sos_score, sos_label = S.strength_of_schedule(g, n)
-            q.append(f"{C.dim('LAST YEAR')} {n.last_year_ppg:.1f} ppg  {n.last_year_total:.1f} pts  "
-                     f"{n.games_played} gms      {C.dim('SOS')} {sos_score:+.1f}% {sos_label}")
+            q.append(ui.kv("LAST YR", C.white(f"{n.last_year_ppg:.1f}") + f" ppg / {n.last_year_total:.1f} pts / {n.games_played} gms"))
+            q.append(ui.kv("SOS", f"{sos_score:+.1f}% {sos_label}"))
         if n.note:
-            q.append(C.dim(f"NOTE {n.note}"))
-        out = [ui.header(f"{n.name}", f"{n.team} {n.slot}"), ui.panel("QUOTE", q)]
-        # --- schedule panel (scoring players only)
+            q.append(C.dim(f"NOTE  {n.note}"))
+        quote = ui.panel("QUOTE", q, left_w)
+
+        # --- weekly projection chart (right of the quote)
+        if team and n.is_scoring:
+            weeks = list(range(1, int(STATS["WEEKS_IN_SEASON"]) + 1))
+            vals = [S.projected_week(g, n, wk) for wk in weeks]
+            chart = ui.vchart(vals, [str(wk) for wk in weeks], height=6, baseline=n.base_value)
+            legend = C.dim(f"weekly projection, green >= base {n.base_value:.1f}, red below   spark ") + ui.sparkline(vals)
+            chart_panel = ui.panel("WEEKLY PROJECTION", [chart, legend], right_w)
+        else:
+            chart_panel = ui.panel("VALUE", [C.dim("structural node - value is a grade, not points")], right_w)
+        top = ui.columns([quote, chart_panel], [left_w, right_w])
+
+        # --- schedule (left) and connections (right)
         if team and n.is_scoring:
             rows = []
             for wk in range(1, int(STATS["WEEKS_IN_SEASON"]) + 1):
@@ -365,17 +513,33 @@ class Terminal:
                 prof = g.defense_profiles.get(opp)
                 allowed = prof.vs.get(n.pos) if (prof and n.pos in prof.vs) else None
                 rows.append([f"{wk}", ("vs " if team.home.get(wk) else "@ ") + opp,
-                             ui.fmt_num(allowed) if allowed is not None else "",
+                             f"{allowed:.1f}" if allowed is not None else "",
                              ui.fmt_chg(S.matchup_adjustment(g, n, wk)),
                              ui.fmt_chg(n.week_deltas.get(wk, 0.0)),
-                             C.white(ui.fmt_num(S.projected_week(g, n, wk)))])
-            out.append(ui.panel("SCHEDULE", [ui.table(["WK", "OPP", "OPP ALLOWS", "MATCHUP", "WK NEWS", "PROJ"],
-                                                      rows, ["<", "<", ">", ">", ">", ">"])]))
-        # --- connections
-        out.append(ui.panel("CONNECTIONS", [self._edge_table(n, limit=12)]))
-        # --- news impact
-        out.append(ui.panel("NEWS IMPACT", [self._explain_table(n, limit=8)]))
-        return "\n".join(out)
+                             ui.fmt_num(S.projected_week(g, n, wk))])
+            sched = ui.panel("SCHEDULE", [ui.table(["WK", "OPP", "ALLOWS", "MATCHUP", "NEWS", "PROJ"], rows,
+                                                   ["<", "<", ">", ">", ">", ">"])], left_w)
+        else:
+            sched = ui.panel("ROSTER", [self._roster_table(n.team, week)] if team else [C.dim("free agent")], left_w)
+        conns = ui.panel("CONNECTIONS  (→ affects, ← affected by)", [self._edge_table(n, limit=9)], right_w)
+        middle = ui.columns([sched, conns], [left_w, right_w])
+
+        # --- news impact full width
+        impact = ui.panel("NEWS IMPACT", [self._explain_table(n, limit=6)])
+        return self.screen(f"PLAYER {n.name.upper()}", top, "", middle, "", impact)
+
+    def _roster_table(self, abbr: str, week: int) -> str:
+        g = self.graph
+        rows = []
+        for n in g.roster(abbr):
+            if n.pos in ("OFF", "OLUNIT"):
+                continue
+            season = S.projected_season(g, n)
+            rows.append([C.amber(n.slot), C.white(n.name), ui.fmt_num(season), ui.fmt_chg(season - n.base_value),
+                         ui.fmt_num(S.projected_week(g, n, week)), f"{n.last_year_ppg:.1f}",
+                         C.dim(n.status if n.status != "ACTIVE" else "")])
+        return ui.table(["SLOT", "NAME", "PROJ", "CHG", f"WK{week}", "LY PPG", "STATUS"], rows,
+                        ["<", "<", ">", ">", ">", ">", "<"])
 
     def cmd_TEAM(self, args, opts):
         """TEAM <ABBR>                   roster board, ratings, schedule and SOS"""
@@ -387,26 +551,36 @@ class Terminal:
         off = g.nodes[team.off_node_id]
         olu = g.nodes[team.ol_node_id]
         dst = g.nodes.get(team.dst_node_id)
-        head = [f"{C.dim('OFFENSE RATING')} {ui.fmt_num(S.projected_season(g, off), 2)} {ui.fmt_chg(off.season_delta)}   "
-                f"{C.dim('O-LINE GRADE')} {ui.fmt_num(S.projected_season(g, olu), 2)} {ui.fmt_chg(olu.season_delta)}   "
-                f"{C.dim('DST PROJ')} {ui.fmt_num(S.projected_season(g, dst), 2) if dst else 'n/a'}   "
-                f"{C.dim('BYE')} WK {team.bye_week}"]
-        rows = []
-        for n in g.roster(team.abbr):
-            if n.pos in ("OFF", "OLUNIT"):
+        w = ui.width()
+        left_w = (w - 2) * 3 // 5
+        right_w = w - 2 - left_w
+
+        head = [ui.kv("OFFENSE", ui.fmt_num(S.projected_season(g, off), 2) + " " + ui.fmt_chg(off.season_delta)) + "   " +
+                ui.kv("O-LINE", ui.fmt_num(S.projected_season(g, olu), 2) + " " + ui.fmt_chg(olu.season_delta)) + "   " +
+                ui.kv("DST", ui.fmt_num(S.projected_season(g, dst), 2) if dst else C.dim("n/a")) + "   " +
+                ui.kv("BYE", C.white(f"WK {team.bye_week}")), ""]
+        roster = ui.panel("ROSTER", head + [self._roster_table(team.abbr, week)], left_w)
+
+        avg = S.league_averages(g)
+        srows = []
+        for wk in range(1, int(STATS["WEEKS_IN_SEASON"]) + 1):
+            opp = team.schedule.get(wk)
+            if opp is None:
+                srows.append([f"{wk}", C.dim("BYE"), "", ""])
                 continue
-            season = S.projected_season(g, n)
-            rows.append([n.slot, C.white(n.name), ui.fmt_num(season), ui.fmt_chg(season - n.base_value),
-                         ui.fmt_num(S.projected_week(g, n, week)), ui.fmt_num(n.last_year_ppg),
-                         C.dim(n.status if n.status != "ACTIVE" else "")])
-        roster = ui.table(["SLOT", "NAME", "PROJ", "CHG", f"WK{week}", "LY PPG", "STATUS"], rows,
-                          ["<", "<", ">", ">", ">", ">", "<"])
-        sched = "  ".join(f"{wk}:{'' if team.home.get(wk) else '@'}{opp}" for wk, opp in sorted(team.schedule.items()))
-        sos = "  ".join(f"{p} {S.strength_of_schedule(g, Node(id='x', name='x', team=team.abbr, pos=p))[0]:+.0f}%"
-                        for p in ("QB", "RB", "WR", "TE", "DST"))
-        return "\n".join([ui.header(f"{team.name}", f"{team.abbr}  {team.division}"),
-                          ui.panel("TEAM", head + ["", roster]),
-                          ui.panel("SCHEDULE", [sched, C.dim("SOS " + sos)])])
+            prof = g.defense_profiles.get(opp)
+            allowed = sum(prof.vs.get(p, 0) for p in ("QB", "RB", "WR", "TE")) if prof else 0
+            avg_all = sum(avg.get(p, 0) for p in ("QB", "RB", "WR", "TE")) or 1
+            pct = (allowed / avg_all - 1) * 100
+            cell = f"{pct:+.0f}%"
+            cell = C.green(cell) if pct > 3 else (C.red(cell) if pct < -3 else C.dim(cell))
+            srows.append([f"{wk}", ("vs " if team.home.get(wk) else "@ ") + opp, cell, ui.dbar(pct, 20, 15)])
+        sos_line = "  ".join(f"{C.amber(p)} {S.strength_of_schedule(g, Node(id='x', name='x', team=team.abbr, pos=p))[0]:+.0f}%"
+                             for p in ("QB", "RB", "WR", "TE", "DST"))
+        sched = ui.panel("SCHEDULE  (opp points allowed vs avg)",
+                         [ui.table(["WK", "OPP", "VS AVG", ""], srows), "", C.dim("SOS ") + sos_line], right_w)
+        return self.screen(f"TEAM {team.abbr} - {team.name.upper()}",
+                           ui.columns([roster, sched], [left_w, right_w]))
 
     def cmd_SCHED(self, args, opts):
         """SCHED <ABBR>                  week-by-week opponents with defense ratings"""
@@ -428,9 +602,10 @@ class Terminal:
                 pct = (v / avg[p] - 1) * 100 if avg.get(p) else 0
                 s = f"{v:.1f} ({pct:+.0f}%)"
                 cells.append(C.green(s) if pct > 4 else (C.red(s) if pct < -4 else s))
-            rows.append([f"{wk}", ("vs " if team.home.get(wk) else "@ ") + opp] + cells + [g.teams[opp].name])
+            rows.append([f"{wk}", C.white(("vs " if team.home.get(wk) else "@ ") + opp)] + cells + [C.dim(g.teams[opp].name)])
         t = ui.table(["WK", "OPP", "ALLOWS QB", "ALLOWS RB", "ALLOWS WR", "ALLOWS TE", "OPPONENT"], rows)
-        return ui.panel(f"{team.abbr} SCHEDULE  (green = soft matchup, red = tough)", [t])
+        return self.screen(f"SCHED {team.abbr}",
+                           ui.panel(f"{team.abbr} SCHEDULE  (green = soft matchup, red = tough)", [t]))
 
     def cmd_WEEK(self, args, opts):
         """WEEK [N]                      show / set the current week used by boards"""
@@ -463,8 +638,9 @@ class Terminal:
     def cmd_EDGES(self, args, opts):
         """EDGES <name>                  every connection into / out of a node with weights"""
         n = self.resolve(" ".join(args))
-        return ui.panel(f"CONNECTIONS - {n.name}  (→ this node affects, ← affected by)",
-                        [self._edge_table(n, limit=200)])
+        return self.screen(f"EDGES {n.name.upper()}",
+                           ui.panel(f"CONNECTIONS - {n.name}  (→ this node affects, ← affected by)",
+                                    [self._edge_table(n, limit=200)]))
 
     def _explain_table(self, n: Node, limit: int = 30) -> str:
         g = self.graph
@@ -474,21 +650,23 @@ class Terminal:
         for c in sorted(n.contributions, key=lambda c: -abs(c.delta))[:limit]:
             chain = C.dim(" → ").join(f"{g.nodes[p].name} {ui.fmt_chg(d)}" for p, d in zip(c.path, c.path_deltas))
             rows.append([ui.fmt_chg(c.delta), "SEASON" if c.week is None else f"WK {c.week}",
-                         C.amber(c.event_label), chain])
-        # totals by event
+                         C.amber(c.event_label[:40]), chain])
         by_event: Dict[str, float] = {}
         for c in n.contributions:
             by_event[c.event_label] = by_event.get(c.event_label, 0.0) + (
                 c.delta if c.week is None else c.delta / STATS["GAMES_IN_SEASON"])
-        totals = "   ".join(f"{ui.fmt_chg(v)} {C.dim(k)}" for k, v in sorted(by_event.items(), key=lambda kv: -abs(kv[1]))[:6])
+        totals = "   ".join(f"{ui.fmt_chg(v)} {C.dim(k[:40])}"
+                            for k, v in sorted(by_event.items(), key=lambda kv: -abs(kv[1]))[:4])
         return ui.table(["DELTA", "WHEN", "EVENT", "CHAIN (how it got here)"], rows) + "\n" + \
             C.dim("season-equivalent totals by event: ") + totals
 
     def cmd_EXPLAIN(self, args, opts):
         """EXPLAIN <name>                why a node moved: every news chain that reached it"""
         n = self.resolve(" ".join(args))
-        return ui.panel(f"EXPLAIN - {n.name}  season chg {ui.fmt_chg(S.projected_season(self.graph, n) - n.base_value)}",
-                        [self._explain_table(n, limit=int(opts.get("rows", 30)))])
+        chg = S.projected_season(self.graph, n) - n.base_value
+        return self.screen(f"EXPLAIN {n.name.upper()}",
+                           ui.panel(f"EXPLAIN - {n.name}  season chg {ui.strip(ui.fmt_chg(chg))}",
+                                    [self._explain_table(n, limit=int(opts.get("rows", 30)))]))
 
     def cmd_IMPACT(self, args, opts):
         """IMPACT <name> <delta> [--week N]   what-if: preview the ripples WITHOUT applying"""
@@ -504,15 +682,17 @@ class Terminal:
             key = (c.path[-1], c.week)
             totals[key] = totals.get(key, 0.0) + c.delta
             depth[key] = min(depth.get(key, 99), len(c.path) - 1)
+        vmax = max(abs(d) for d in totals.values()) or 1.0
         rows = []
         for (nid, wk), d in sorted(totals.items(), key=lambda kv: -abs(kv[1]))[:int(opts.get("rows", 40))]:
             t = self.graph.nodes[nid]
             rows.append([ui.arrow(d), C.white(t.name), t.team, t.slot, ui.fmt_chg(d),
+                         ui.dbar(d, vmax, 17),
                          "SEASON" if wk is None else f"WK {wk}", C.dim(f"{depth[(nid, wk)]} hop(s)")])
-        return ui.panel(f"WHAT-IF: {n.name} {delta:+.2f}" + (f" in week {week}" if week else "") +
-                        f"  -> {len(totals)} nodes touched (nothing applied)",
-                        [ui.table(["", "NODE", "TM", "SLOT", "DELTA", "WHEN", "DISTANCE"], rows,
-                                  ["<", "<", "<", "<", ">", "<", "<"])])
+        title = f"WHAT-IF: {n.name} {delta:+.2f}" + (f" in week {week}" if week else "") + \
+            f"  →  {len(totals)} nodes touched (nothing applied)"
+        return self.screen("IMPACT", ui.panel(title, [ui.table(["", "NODE", "TM", "SLOT", "DELTA", "", "WHEN", "DISTANCE"],
+                                                                rows, ["<", "<", "<", "<", ">", "<", "<", "<"])]))
 
     # ---------------- news -----------------------------------------------
     def cmd_NEWS(self, args, opts):
@@ -520,21 +700,21 @@ class Terminal:
         sub = args[0].upper() if args else "LIST"
         if sub == "LIST":
             if not self.actions:
-                return C.dim("no news yet.  HELP NEWS for the types.")
+                return self.screen("NEWS", ui.panel("NEWS LOG", [C.dim("no news yet.  HELP NEWS for the types.")]))
             rows = []
             for a in self.actions:
                 p = a.params
                 if a.kind == "NEWS":
                     desc = f"{p['type']} {self.graph.nodes[p['target']].name}"
                     extra = " ".join(x for x in [
-                        (f"-> {p['team']}" if p.get("team") else ""),
+                        (f"→ {p['team']}" if p.get("team") else ""),
                         (f"mag {p['magnitude']}" if p.get("magnitude") else ""),
                         (f"weeks {p['weeks']}" if p.get("weeks") else ""),
                         (f"\"{p['note']}\"" if p.get("note") else "")] if x)
                 else:
                     desc, extra = a.kind, json.dumps(p)
-                rows.append([f"{a.id}", C.dim(a.stamp), C.white(desc), extra])
-            return ui.panel("NEWS LOG", [ui.table(["ID", "TIME", "ITEM", "DETAILS"], rows)])
+                rows.append([C.amber(f"#{a.id}"), C.dim(a.stamp), C.white(desc), extra])
+            return self.screen("NEWS", ui.panel("NEWS LOG", [ui.table(["ID", "TIME", "ITEM", "DETAILS"], rows)]))
         if sub == "UNDO":
             if not self.actions:
                 raise CommandError("nothing to undo")
@@ -582,11 +762,14 @@ class Terminal:
         after = {nid: S.projected_season(self.graph, x) for nid, x in self.graph.nodes.items()}
         moved = sorted(((nid, after[nid] - before[nid]) for nid in after if abs(after[nid] - before[nid]) > 0.005),
                        key=lambda kv: -abs(kv[1]))
+        vmax = max((abs(d) for _, d in moved), default=1.0) or 1.0
         rows = [[ui.arrow(d), C.white(self.graph.nodes[nid].name), self.graph.nodes[nid].team,
-                 self.graph.nodes[nid].slot, ui.fmt_chg(d)] for nid, d in moved[:15]]
-        body = [ui.table(["", "NODE", "TM", "SLOT", "SEASON CHG"], rows, ["<", "<", "<", "<", ">"])] if rows else \
-               [C.dim("no season-level movement (weekly-only news shows on the week boards)")]
-        return ui.panel(f"NEWS #{a.id} APPLIED: {ntype} {node.name}  -> {len(moved)} nodes moved", body)
+                 self.graph.nodes[nid].slot, ui.fmt_chg(d), ui.dbar(d, vmax, 21)]
+                for nid, d in moved[:20]]
+        body = [ui.table(["", "NODE", "TM", "SLOT", "SEASON CHG", ""], rows, ["<", "<", "<", "<", ">", "<"])] if rows else \
+               [C.dim("no season-level movement (weekly-only news shows on the week boards and PLAYER charts)")]
+        return self.screen("NEWS ADD",
+                           ui.panel(f"NEWS #{a.id} APPLIED: {ntype} {node.name}  →  {len(moved)} nodes moved", body))
 
     # ---------------- graph editing ------------------------------------
     def cmd_ADD(self, args, opts):
@@ -631,11 +814,17 @@ class Terminal:
             if flt and flt not in k:
                 continue
             mark = C.amber("*") if k in self.weight_overrides else ""
-            rows.append([C.white(k), ui.fmt_chg(v), mark])
+            rows.append([C.white(k), ui.fmt_chg(v), ui.bar(abs(v), 1.0, 12, "green" if v > 0 else "red"), mark])
+        # three columns of weights so they fit on one screen
+        t = ui.table(["KEY", "WEIGHT", "", ""], rows)
+        lines = t.split("\n")
+        head, body = lines[:2], lines[2:]
+        per = (len(body) + 2) // 3
+        cols = ["\n".join(head + body[i:i + per]) for i in range(0, len(body), per)]
         prop = "   ".join(f"{k}={v}" for k, v in self.graph.propagation.items())
-        return ui.panel("WEIGHTS  (* = changed this session)",
-                        [ui.table(["KEY", "WEIGHT", ""], rows), "", C.dim("PROPAGATION " + prop),
-                         C.dim("SET WEIGHT <KEY> <value>   SET MAX_DEPTH 6   SET MIN_DELTA 0.01   SET DAMPING 0.9")])
+        return self.screen("WEIGHTS", ui.panel("WEIGHTS  (* = changed this session)", [
+            ui.columns(cols), "", C.dim("PROPAGATION " + prop),
+            C.dim("SET WEIGHT <KEY> <value>   SET MAX_DEPTH 6   SET MIN_DELTA 0.01   SET DAMPING 0.9")]))
 
     def cmd_SET(self, args, opts):
         """SET WEIGHT <KEY> <v> | SET MAX_DEPTH|MIN_DELTA|DAMPING <v>   tune the model live"""

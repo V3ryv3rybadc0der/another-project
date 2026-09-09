@@ -106,6 +106,26 @@ class GraphTests(unittest.TestCase):
         self.assertGreater(hill.season_delta, 0)
         self.assertAlmostEqual(hill.contributions[0].delta, 4 * 0.9)
 
+    def test_screens_render_and_fit_width(self):
+        """Every full screen builds without error and no line is wider than the screen."""
+        ui.set_color(True)
+        try:
+            self.t.run_line("NEWS ADD trent williams RELEASED")
+            for cmd in ("HOME", "TICKER", "RANK WR", "SOS QB", "PLAYER brock purdy", "TEAM SF",
+                        "SCHED KC", "EDGES purdy", "EXPLAIN purdy", "IMPACT mahomes -5", "WEIGHTS", "HELP"):
+                out = self.t.run_line(cmd)
+                self.assertNotIn("error:", ui.strip(out), cmd)
+                for line in ui.strip(out).split("\n"):
+                    self.assertLessEqual(len(line), ui.width(), f"{cmd}: line too wide")
+        finally:
+            ui.set_color(False)
+
+    def test_ui_helpers(self):
+        self.assertEqual(ui.strip(ui.dbar(-1.0, 1.0, 11)), "█████│     ")
+        self.assertEqual(ui.strip(ui.dbar(0.5, 1.0, 11)), "     │███  ")
+        two = ui.columns(["a\nb\nc", "x"], [3, 3])
+        self.assertEqual(two.split("\n"), ["a    x  ", "b       ", "c       "])
+
     def test_save_and_load_roundtrip(self):
         import tempfile
         path = os.path.join(tempfile.mkdtemp(), "s.json")

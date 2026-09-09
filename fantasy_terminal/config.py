@@ -158,8 +158,14 @@ STATS = {
 DISPLAY = {
     # Set to False (or run with --no-color / set env NO_COLOR=1) for plain text.
     "COLOR": True,
-    # Width of the screen used for panels.
-    "WIDTH": 100,
+    # Width of the screen.  "auto" follows the terminal window (minimum 100),
+    # or put a number here for a fixed width.
+    "WIDTH": "auto",
+    # Clear the screen before every command in interactive mode, so each
+    # function replaces the previous one like a real terminal screen.
+    "CLEAR_SCREEN": True,
+    # How many cells the top ticker strip shows.
+    "TICKER_CELLS": 12,
     # How many rows the TICKER / RANK boards show by default.
     "DEFAULT_ROWS": 20,
     # Prompt text.
