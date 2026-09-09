@@ -161,12 +161,18 @@ DISPLAY = {
     # Width of the screen.  "auto" follows the terminal window (minimum 100),
     # or put a number here for a fixed width.
     "WIDTH": "auto",
+    # Height of the screen.  "auto" follows the terminal window (minimum 24),
+    # or put a number here.  Boards grow to fill whatever room there is, so a
+    # taller window simply shows more rows.
+    "HEIGHT": "auto",
+
     # Clear the screen before every command in interactive mode, so each
     # function replaces the previous one like a real terminal screen.
     "CLEAR_SCREEN": True,
     # How many cells the top ticker strip shows.
     "TICKER_CELLS": 12,
-    # How many rows the TICKER / RANK boards show by default.
+    # Fallback row count for the boards when the screen height cannot be
+    # worked out.  Normally the boards size themselves to the window instead.
     "DEFAULT_ROWS": 20,
     # Prompt text.
     "PROMPT": "FFT> ",

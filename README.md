@@ -48,6 +48,7 @@ Style knobs (all in `fantasy_terminal/ui.py` → `THEME` and `config.py` → `DI
 |---|---|
 | `THEME["amber"]`, `["green"]`, `["red"]`, `["navy"]` ... | 256-colour codes for each role |
 | `DISPLAY["WIDTH"]` | `"auto"` follows the window (min 100) or a fixed number; env `FFT_WIDTH=140` overrides |
+| `DISPLAY["HEIGHT"]` | `"auto"` follows the window (min 24) or a fixed number; env `FFT_HEIGHT=50` overrides |
 | `DISPLAY["CLEAR_SCREEN"]` | each command replaces the screen (True) or scrolls like a log (False) |
 | `DISPLAY["TICKER_CELLS"]` | how many names the top ticker strip shows |
 | `--no-color` / `NO_COLOR=1` | plain text |
@@ -99,6 +100,7 @@ the standard library.
 | `SET MAX_DEPTH 6` / `SET MIN_DELTA 0.01` / `SET DAMPING 0.9` | Tune how far shocks travel. |
 | `SAVE [file]` / `LOAD [file]` | Persist the news log + weight changes as JSON (default `data/session.json`). |
 | `RESET` | Back to the base projections. |
+| `TAB NEW <cmd>` / `TAB <n>` / `TAB CLOSE <n>` | Several screens open at once. `T2` is shorthand for `TAB 2`. |
 | `FEED FETCH [--ai]` | Pull real NFL news into a review queue. Without `--ai` it reads the live injury report (free, no key). With `--ai` it also reads RSS headlines using Claude. |
 | `FEED LIST` / `APPLY <id\|ALL\|HIGH>` / `DROP <id>` / `SKIPPED` / `CLEAR` | Review the queue, then commit what you approve. Nothing is applied until you say so. |
 | `ROSTER NEW <name>` / `ADD` / `DROP` / `DEL` | Set up your team, your opponent, a trade partner. |
@@ -109,7 +111,7 @@ the standard library.
 | `RECAP <team> [--date] [--ai]` | What happened in a finished game and what it means. |
 | `QUIT` | Leave. |
 
-Typing a bare menu number (`1`-`9`) jumps to that screen.  Names are fuzzy and case-insensitive: `PLAYER mahomes`, `NEWS ADD purdy OUT`.
+Typing a bare menu number (`0`-`9`) jumps to that screen.  Names are fuzzy and case-insensitive: `PLAYER mahomes`, `NEWS ADD purdy OUT`.
 Quote a name only when a command takes several names (`LINK "A" "B" 0.3`).
 
 ### News types  (`HELP NEWS`)

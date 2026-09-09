@@ -152,6 +152,12 @@ class Terminal:
         # Your league: named rosters (MYTEAM, OPPONENT, a trade partner...).
         # Saved and restored by SAVE / LOAD along with the news log.
         self.rosters: Dict[str, rostermod.Roster] = {}
+        # Tabs: each one remembers the command it is showing, so switching
+        # back to it re-runs that command with fresh numbers.
+        # [[display name, command line], ...]
+        self.tabs: List[List[str]] = [["HOME", "HOME"]]
+        self.active_tab = 1
+        self._in_tab_switch = False
         self.graph = None
         self.rebuild()
 
@@ -249,6 +255,10 @@ class Terminal:
         for key, command in MENU:          # a bare menu number -> that command
             if line == key:
                 line = command
+        # T1 / T2 / ... jump straight to that tab
+        m = re.fullmatch(r"[Tt](\d+)", line)
+        if m:
+            line = f"TAB {m.group(1)}"
         try:
             tokens = smart_split(line)
         except ValueError as e:
@@ -262,6 +272,11 @@ class Terminal:
         if fn is None:
             return C.red(f"unknown command '{tokens[0]}'  (type HELP)")
         args, opts = split_opts(tokens[1:])
+        # A full-screen command becomes what this tab is showing, so that
+        # switching away and back re-runs it rather than losing the view.
+        if cmd not in ("TAB", "QUIT", "HELP") and not self._in_tab_switch:
+            if self.tabs and 1 <= self.active_tab <= len(self.tabs):
+                self.tabs[self.active_tab - 1][1] = line
         try:
             return fn(args, opts) or ""
         except CommandError as e:
@@ -291,11 +306,34 @@ class Terminal:
     def menu_bar(self) -> str:
         return ui.menu_bar([f"{k}) {v}" for k, v in MENU] + ["Q) QUIT"])
 
+    def chrome_rows(self) -> int:
+        """How many rows the furniture eats: status bar, ticker, rule, menu,
+        and the input line, plus the tab bar when more than one tab is open."""
+        return 6 + (1 if len(self.tabs) > 1 else 0)
+
+    def body_rows(self, panel_chrome: int = 4) -> int:
+        """How many DATA rows a board can show and still fit the window.
+
+        panel_chrome covers the panel title, the column headers, the rule
+        under them and any footnote, so callers get a straight row count.
+        """
+        return max(5, ui.height() - self.chrome_rows() - panel_chrome)
+
+    def rows_opt(self, opts: dict, panel_chrome: int = 4) -> int:
+        """--rows N if given, otherwise fill the window."""
+        if "rows" in opts:
+            return int(opts["rows"])
+        return self.body_rows(panel_chrome)
+
     def screen(self, function: str, *blocks: str) -> str:
-        """Wrap content blocks in the standard screen: status bar, ticker, body, menu."""
+        """Wrap content blocks in the standard screen: status bar, ticker,
+        tab bar (when more than one tab is open), body, menu."""
         body = "\n".join(b for b in blocks if b)
-        return ui.paint("\n".join([self.status_bar(function), self.ticker_strip(), ui.rule(), body,
-                                   self.menu_bar()]))
+        parts = [self.status_bar(function), self.ticker_strip()]
+        if len(self.tabs) > 1:
+            parts.append(ui.tab_bar([(t[0], t[1]) for t in self.tabs], self.active_tab))
+        parts += [ui.rule(), body, self.menu_bar()]
+        return ui.paint("\n".join(parts))
 
     def repl(self) -> None:
         """Interactive loop.  Ctrl-D or QUIT to leave."""
@@ -341,7 +379,9 @@ class Terminal:
                 lines.append(C.white(cmd) + "  " + rest.strip())
         lines += ["", C.dim("Aliases: P=PLAYER T=TEAM MOV=TICKER R=RANK X=EXPLAIN SIM=IMPACT H=HOME Q=QUIT"),
                   C.dim("Options: --weeks 3 | --weeks 1-4 | --week 5 | --rows 30 | --note \"text\""),
-                  C.dim("Type a menu number (1-9) to jump to that screen.")]
+                  C.dim("Type a menu number (0-9) to jump to that screen."),
+                  C.dim("Tabs: TAB NEW <cmd> opens one, TAB 2 (or T2) switches, TAB CLOSE <n> removes."),
+                  C.dim("Boards fill the window - make the window taller and they show more rows.")]
         return self.screen("HELP", ui.panel("COMMANDS", lines))
 
     # ---------------- HOME dashboard ------------------------------------
@@ -352,21 +392,36 @@ class Terminal:
         w = ui.width()
         left_w = (w - 2) // 2
         right_w = w - 2 - left_w
+        # Split the window between the two rows of panels so the dashboard
+        # fills whatever height the terminal has.  Each panel spends 3 rows on
+        # its title and column headers, so the rest is data.
+        avail = self.body_rows(panel_chrome=1)
+        top_h = max(6, avail // 2)
+        bottom_h = max(6, avail - top_h - 1)
+        top_rows, bottom_rows = max(3, top_h - 3), max(3, bottom_h - 3)
 
-        # --- top-left: biggest movers
-        movers = S.movers(g)[:10]
+        # --- top-left: biggest movers.  With no news yet the board would be
+        # blank, so fall back to the top projections and say so - an empty
+        # panel teaches you nothing.
+        movers = S.movers(g)[:top_rows]
         if movers:
             rows = [[ui.arrow(chg), C.white(n.name[:20]), n.team, n.slot, ui.fmt_num(S.projected_season(g, n)),
                      ui.fmt_chg(chg), ui.pct(chg, n.base_value)] for n, chg in movers]
-            mv = ui.table(["", "NAME", "TM", "SLOT", "PROJ", "CHG", "CHG%"], rows,
-                          ["<", "<", "<", "<", ">", ">", ">"])
+            mv_title = "BIGGEST MOVERS"
+            note = None
         else:
-            mv = C.dim("board is flat - add news with NEWS ADD <name> <TYPE>")
-        movers_panel = ui.panel("BIGGEST MOVERS", [mv], left_w)
+            rows = [[C.dim(f"{i}"), C.white(n.name[:20]), n.team, n.slot, ui.fmt_num(v),
+                     ui.fmt_chg(0.0), C.dim("  -")]
+                    for i, (n, v) in enumerate(S.rankings(g)[:top_rows], start=1)]
+            mv_title = "TOP PROJECTIONS  (no news yet)"
+            note = C.dim("FEED FETCH pulls the live injury report and this becomes a movers board")
+        mv = ui.table(["", "NAME", "TM", "SLOT", "PROJ", "CHG", "CHG%"], rows,
+                      ["<", "<", "<", "<", ">", ">", ">"])
+        movers_panel = ui.fill(ui.panel(mv_title, [mv] + ([note] if note else []), left_w), top_h)
 
         # --- top-right: news feed (latest first)
         feed_rows = []
-        for a in reversed(self.actions[-10:]):
+        for a in reversed(self.actions[-top_rows:]):
             p = a.params
             if a.kind == "NEWS":
                 item = f"{p['type']} {g.nodes[p['target']].name}"
@@ -378,23 +433,33 @@ class Terminal:
                 item = f"{a.kind} {json.dumps(p)[:40]}"
             feed_rows.append([C.dim(a.stamp[-5:]), C.amber(f"#{a.id}"), C.white(item[:34]),
                               C.dim((p.get("note") or "")[:right_w - 50])])
-        feed = ui.table(["TIME", "ID", "HEADLINE", "NOTE"], feed_rows) if feed_rows else \
-            C.dim("no headlines yet.  HELP NEWS lists the types.")
-        feed_panel = ui.panel("NEWS FEED", [feed], right_w)
+        if feed_rows:
+            feed = ui.table(["TIME", "ID", "HEADLINE", "NOTE"], feed_rows)
+        else:
+            feed = "\n".join([
+                C.dim("no headlines yet.  Two ways to fill this:"), "",
+                C.white("  FEED FETCH") + C.dim("                 today's real injury report"),
+                C.white("  FEED FETCH --ai") + C.dim("            also read news headlines"),
+                C.white('  NEWS ADD mahomes OUT') + C.dim("       type one in yourself"), "",
+                C.dim("HELP NEWS lists every news type."),
+            ])
+        feed_panel = ui.fill(ui.panel("NEWS FEED", [feed], right_w), top_h)
 
         # --- bottom-left: top plays this week, one per position, with bars
         play_rows = []
         overall = S.rankings(g, None, week)
         vmax = overall[0][1] if overall else 1.0
-        for pos in ("QB", "RB", "WR", "TE", "K", "DST"):
-            top = S.rankings(g, pos, week)[:3]
+        positions = ("QB", "RB", "WR", "TE", "K", "DST")
+        per_pos = max(1, bottom_rows // len(positions))
+        for pos in positions:
+            top = S.rankings(g, pos, week)[:per_pos]
             for n, val in top:
                 opp = S.opponent(g, n, week) or ""
                 play_rows.append([C.amber(pos), C.white(n.name[:20]), n.team, opp, ui.fmt_num(val),
                                   ui.bar(val, vmax, 12)])
         plays = ui.table(["POS", f"WEEK {week} TOP PLAYS", "TM", "OPP", "PROJ", ""], play_rows,
                          ["<", "<", "<", "<", ">", "<"])
-        plays_panel = ui.panel(f"WEEK {week} - TOP PLAYS BY POSITION", [plays], left_w)
+        plays_panel = ui.fill(ui.panel(f"WEEK {week} - TOP PLAYS BY POSITION", [plays], left_w), bottom_h)
 
         # --- bottom-right: this week's games with offense ratings and DST projections
         game_rows, seen = [], set()
@@ -412,12 +477,86 @@ class Terminal:
                               ui.fmt_num(S.projected_week(g, hd, week)) if hd else ""])
         byes = ", ".join(a for a, t in sorted(g.teams.items()) if t.bye_week == week)
         games = ui.table(["AWAY", "OFF", "", "HOME", "OFF", "AWAY DST", "HOME DST"], game_rows,
-                         ["<", ">", "<", "<", ">", ">", ">"])
-        games_panel = ui.panel(f"WEEK {week} - GAMES", [games, C.dim(f"BYE: {byes or 'none'}")], right_w)
+                         ["<", ">", "<", "<", ">", ">", ">"], max_rows=max(3, bottom_rows - 1))
+        games_panel = ui.fill(ui.panel(f"WEEK {week} - GAMES",
+                                       [games, C.dim(f"BYE: {byes or 'none'}")], right_w), bottom_h)
 
         top = ui.columns([movers_panel, feed_panel], [left_w, right_w])
         bottom = ui.columns([plays_panel, games_panel], [left_w, right_w])
         return self.screen("HOME", top, "", bottom)
+
+    # ---------------- tabs ---------------------------------------------
+    def cmd_TAB(self, args, opts):
+        """TAB [n] | NEW <cmd> | CLOSE <n> | RENAME <n> <name>   several screens at once"""
+        sub = args[0].upper() if args else ""
+
+        # ---- TAB NEW <command...> --------------------------------------
+        if sub == "NEW":
+            if len(args) < 2:
+                raise CommandError('TAB NEW <command>   e.g. TAB NEW ROSTER MYTEAM')
+            command = " ".join(args[1:])
+            name = opts.get("name") or self._tab_name(command)
+            self.tabs.append([name, command])
+            self.active_tab = len(self.tabs)
+            return self._show_tab(self.active_tab)
+
+        # ---- TAB CLOSE <n> ---------------------------------------------
+        if sub in ("CLOSE", "DEL"):
+            if len(self.tabs) <= 1:
+                raise CommandError("cannot close the last tab")
+            n = int(args[1]) if len(args) > 1 and is_number(args[1]) else self.active_tab
+            if not 1 <= n <= len(self.tabs):
+                raise CommandError(f"no tab {n}")
+            gone = self.tabs.pop(n - 1)
+            self.active_tab = min(self.active_tab, len(self.tabs))
+            return C.amber(f"closed tab {n} ({gone[0]})")
+
+        # ---- TAB RENAME <n> <name> -------------------------------------
+        if sub == "RENAME":
+            if len(args) < 3:
+                raise CommandError("TAB RENAME <n> <name>")
+            n = int(args[1])
+            if not 1 <= n <= len(self.tabs):
+                raise CommandError(f"no tab {n}")
+            self.tabs[n - 1][0] = " ".join(args[2:]).upper()[:18]
+            return C.amber(f"tab {n} renamed {self.tabs[n - 1][0]}")
+
+        # ---- TAB <n>: switch -------------------------------------------
+        if args and is_number(args[0]):
+            n = int(args[0])
+            if not 1 <= n <= len(self.tabs):
+                raise CommandError(f"no tab {n} (you have {len(self.tabs)})")
+            self.active_tab = n
+            return self._show_tab(n)
+
+        # ---- TAB: list --------------------------------------------------
+        rows = []
+        for i, (name, command) in enumerate(self.tabs, start=1):
+            rows.append([C.amber(f"{i}") + (C.green(" *") if i == self.active_tab else "  "),
+                         C.white(name), C.dim(command)])
+        return self.screen("TABS", ui.panel(f"TABS - {len(self.tabs)} open", [
+            ui.table(["#", "NAME", "SHOWING"], rows), "",
+            C.dim("TAB 2 switches (or just T2)   TAB NEW <cmd> adds   TAB CLOSE <n> removes"),
+            C.dim("Each tab re-runs its command when you switch to it, so the numbers are fresh.")]))
+
+    def _tab_name(self, command: str) -> str:
+        """Short label for a tab, taken from the command it runs."""
+        parts = command.strip().split()
+        if not parts:
+            return "BLANK"
+        head = parts[0].upper()
+        rest = " ".join(parts[1:3]).upper()
+        return (f"{head} {rest}".strip())[:18]
+
+    def _show_tab(self, n: int) -> str:
+        """Re-run the command a tab is showing, without recording it again."""
+        name, command = self.tabs[n - 1]
+        self._in_tab_switch = True
+        try:
+            out = self.run_line(command)
+        finally:
+            self._in_tab_switch = False
+        return out or self.screen(name, ui.panel(name, [C.dim(f"'{command}' produced no screen")]))
 
     # ---------------- boards -------------------------------------------
     def cmd_TICKER(self, args, opts):
@@ -425,7 +564,7 @@ class Terminal:
         g = self.graph
         pos = args[0].upper() if args else None
         week = int(opts.get("week", self.week))
-        rows_n = int(opts.get("rows", DISPLAY["DEFAULT_ROWS"]))
+        rows_n = self.rows_opt(opts, panel_chrome=5)
         movers = S.movers(g, pos=pos)
         if not movers:
             movers = [(n, 0.0) for n, _ in S.rankings(g, pos)[:rows_n]]
@@ -452,7 +591,7 @@ class Terminal:
         pos = args[0].upper() if args else "ALL"
         pos = None if pos == "ALL" else pos
         week = int(opts["week"]) if "week" in opts else None
-        rows_n = int(opts.get("rows", DISPLAY["DEFAULT_ROWS"]))
+        rows_n = self.rows_opt(opts, panel_chrome=4)
         ranked = S.rankings(g, pos, week)
         vmax = ranked[0][1] if ranked else 1.0
         rows = []
@@ -478,7 +617,8 @@ class Terminal:
             rows.append([C.white(abbr), self.graph.teams[abbr].name, f"{score:+.1f}%",
                          ui.dbar(score, vmax, 17), col(label),
                          f"WK {self.graph.teams[abbr].bye_week}"])
-        t = ui.table(["TM", "TEAM", "VS AVG", "", "RATING", "BYE"], rows, ["<", "<", ">", "<", "<", "<"])
+        t = ui.table(["TM", "TEAM", "VS AVG", "", "RATING", "BYE"], rows, ["<", "<", ">", "<", "<", "<"],
+                     max_rows=self.rows_opt(opts, 4))
         return self.screen(f"SOS {pos}",
                            ui.panel(f"STRENGTH OF SCHEDULE - {pos}  (+ = opponents allow more = easier)", [t]))
 
@@ -693,7 +833,7 @@ class Terminal:
         chg = S.projected_season(self.graph, n) - n.base_value
         return self.screen(f"EXPLAIN {n.name.upper()}",
                            ui.panel(f"EXPLAIN - {n.name}  season chg {ui.strip(ui.fmt_chg(chg))}",
-                                    [self._explain_table(n, limit=int(opts.get("rows", 30)))]))
+                                    [self._explain_table(n, limit=self.rows_opt(opts, 5))]))
 
     def cmd_IMPACT(self, args, opts):
         """IMPACT <name> <delta> [--week N]   what-if: preview the ripples WITHOUT applying"""
@@ -711,7 +851,7 @@ class Terminal:
             depth[key] = min(depth.get(key, 99), len(c.path) - 1)
         vmax = max(abs(d) for d in totals.values()) or 1.0
         rows = []
-        for (nid, wk), d in sorted(totals.items(), key=lambda kv: -abs(kv[1]))[:int(opts.get("rows", 40))]:
+        for (nid, wk), d in sorted(totals.items(), key=lambda kv: -abs(kv[1]))[:self.rows_opt(opts, 5)]:
             t = self.graph.nodes[nid]
             rows.append([ui.arrow(d), C.white(t.name), t.team, t.slot, ui.fmt_chg(d),
                          ui.dbar(d, vmax, 17),

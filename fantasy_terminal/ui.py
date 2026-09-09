@@ -107,6 +107,20 @@ def width() -> int:
     return int(w)
 
 
+def height() -> int:
+    """Screen height in rows.  DISPLAY["HEIGHT"] = "auto" follows the terminal
+    window (minimum 24), or set a fixed number.  Env FFT_HEIGHT overrides."""
+    h = DISPLAY.get("HEIGHT", "auto")
+    if os.environ.get("FFT_HEIGHT"):
+        return int(os.environ["FFT_HEIGHT"])
+    if h == "auto":
+        try:
+            return max(24, shutil.get_terminal_size((120, 40)).lines)
+        except Exception:
+            return 40
+    return int(h)
+
+
 _ANSI = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 
 
@@ -220,6 +234,15 @@ def columns(blocks: Sequence[str], widths: Sequence[int] = None, gap: int = 2) -
     return "\n".join(out)
 
 
+def fill(block: str, rows: int) -> str:
+    """Pad a block with blank lines so it occupies exactly `rows` lines.
+    Used to push the bottom panels down to the foot of the screen."""
+    lines = str(block).split("\n")
+    if len(lines) >= rows:
+        return "\n".join(lines[:rows])
+    return "\n".join(lines + [""] * (rows - len(lines)))
+
+
 def table(headers: Sequence[str], rows: Sequence[Sequence[str]], aligns: Sequence[str] = None,
           max_rows: int = None) -> str:
     """Aligned columns: amber headers, thin rule, then the rows."""
@@ -246,6 +269,17 @@ def menu_bar(items: Sequence[str]) -> str:
     w = width()
     body = "  ".join(items)
     return bg("menu_bg", pad(" " + body, w), "menu_fg", bold=True)
+
+
+def tab_bar(tabs: Sequence[tuple], active: int) -> str:
+    """[1 HOME] [2 TICKER] [3 ROSTER MYTEAM] with the active tab highlighted."""
+    cells = []
+    for i, (name, _cmd) in enumerate(tabs, start=1):
+        label = f" {i} {name} "
+        cells.append(bg("amber", label, "black", bold=True) if i == active
+                     else bg("menu_bg", label, "menu_fg"))
+    cells.append(C.dim("  TAB <n> switch   TAB NEW <cmd> add   TAB CLOSE <n>"))
+    return clip(" ".join(cells), width())
 
 
 def ticker_strip(items: Sequence[str]) -> str:
