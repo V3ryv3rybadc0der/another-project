@@ -139,3 +139,65 @@ class GraphTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScreenFitTests(unittest.TestCase):
+    """Every screen must fit the window at any terminal size.
+
+    A line wider than the window wraps and pushes the rest down; a screen
+    taller than the window scrolls the status bar and menu off the top.
+    Either one defeats the point of a fixed-furniture terminal, so this
+    checks the whole command surface at sizes from a stock 80x24 Mac
+    Terminal up to a full-screen window.
+    """
+
+    SCREENS = ["HOME", "TICKER", "RANK ALL", "RANK QB", "SOS", "PLAYER mahomes",
+               "TEAM KC", "SCHED KC", "EDGES mahomes", "EXPLAIN mahomes",
+               "IMPACT mahomes -5", "WEIGHTS", "NEWS LIST", "FEED LIST",
+               "ROSTER", "HELP", "SIZE", "TAB"]
+
+    def _check(self, width, height):
+        os.environ["FFT_WIDTH"] = str(width)
+        os.environ["FFT_HEIGHT"] = str(height)
+        try:
+            term = Terminal()
+            for cmd in self.SCREENS:
+                out = term.run_line(cmd)
+                lines = ui.strip(out).split("\n")
+                widest = max(len(l) for l in lines)
+                self.assertLessEqual(widest, width,
+                                     f"{cmd} at {width}x{height}: line of {widest} columns")
+                self.assertLessEqual(len(lines), height,
+                                     f"{cmd} at {width}x{height}: {len(lines)} rows")
+        finally:
+            os.environ.pop("FFT_WIDTH", None)
+            os.environ.pop("FFT_HEIGHT", None)
+
+    def test_fits_a_stock_mac_terminal(self):
+        self._check(80, 24)
+
+    def test_fits_a_medium_window(self):
+        self._check(100, 30)
+
+    def test_fits_a_wide_window(self):
+        self._check(160, 50)
+
+    def test_narrow_mode_stacks_instead_of_overflowing(self):
+        os.environ["FFT_WIDTH"] = "80"
+        try:
+            self.assertTrue(ui.is_narrow())
+            # columns() stacks rather than slicing panels into unusable strips
+            out = ui.columns(["aaa\nbbb", "ccc"], [40, 40])
+            self.assertEqual(out.split("\n"), ["aaa", "bbb", "ccc"])
+        finally:
+            os.environ.pop("FFT_WIDTH", None)
+
+    def test_wide_mode_keeps_panels_side_by_side(self):
+        os.environ["FFT_WIDTH"] = "160"
+        try:
+            self.assertFalse(ui.is_narrow())
+            out = ui.columns(["aaa", "ccc"], [10, 10])
+            self.assertIn("aaa", out.split("\n")[0])
+            self.assertIn("ccc", out.split("\n")[0])
+        finally:
+            os.environ.pop("FFT_WIDTH", None)

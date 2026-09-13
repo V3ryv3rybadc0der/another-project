@@ -101,6 +101,7 @@ the standard library.
 | `SAVE [file]` / `LOAD [file]` | Persist the news log + weight changes as JSON (default `data/session.json`). |
 | `RESET` | Back to the base projections. |
 | `TAB NEW <cmd>` / `TAB <n>` / `TAB CLOSE <n>` | Several screens open at once. `T2` is shorthand for `TAB 2`. |
+| `SIZE [cols rows \| AUTO]` | Show or force the screen size when auto-detection is wrong. |
 | `FEED FETCH [--ai]` | Pull real NFL news into a review queue. Without `--ai` it reads the live injury report (free, no key). With `--ai` it also reads RSS headlines using Claude. |
 | `FEED LIST` / `APPLY <id\|ALL\|HIGH>` / `DROP <id>` / `SKIPPED` / `CLEAR` | Review the queue, then commit what you approve. Nothing is applied until you say so. |
 | `ROSTER NEW <name>` / `ADD` / `DROP` / `DEL` | Set up your team, your opponent, a trade partner. |

@@ -57,8 +57,11 @@ from .ui import C
 
 # The numbered function menu at the bottom of every screen.  Typing just the
 # number runs the command, like picking an item off a terminal menu.
-MENU = [("1", "HOME"), ("2", "TICKER"), ("3", "RANK ALL"), ("4", "RANK QB"), ("5", "RANK RB"),
-        ("6", "RANK WR"), ("7", "SOS"), ("8", "NEWS LIST"), ("9", "FEED LIST"), ("0", "ROSTER")]
+# key, the command it runs, and a short label for narrow windows.
+MENU = [("1", "HOME", "HOME"), ("2", "TICKER", "TICK"), ("3", "RANK ALL", "ALL"),
+        ("4", "RANK QB", "QB"), ("5", "RANK RB", "RB"), ("6", "RANK WR", "WR"),
+        ("7", "SOS", "SOS"), ("8", "NEWS LIST", "NEWS"), ("9", "FEED LIST", "FEED"),
+        ("0", "ROSTER", "TEAM")]
 
 
 class CommandError(Exception):
@@ -252,7 +255,7 @@ class Terminal:
         line = line.strip()
         if not line or line.startswith("#"):
             return ""
-        for key, command in MENU:          # a bare menu number -> that command
+        for key, command, _short in MENU:  # a bare menu number -> that command
             if line == key:
                 line = command
         # T1 / T2 / ... jump straight to that tab
@@ -304,7 +307,11 @@ class Terminal:
         return ui.ticker_strip(cells)
 
     def menu_bar(self) -> str:
-        return ui.menu_bar([f"{k}) {v}" for k, v in MENU] + ["Q) QUIT"])
+        """The numbered function menu.  On a narrow window the labels are
+        trimmed to the key plus a short word so the bar still fits."""
+        if ui.is_narrow():
+            return ui.menu_bar([f"{k}){short}" for k, _cmd, short in MENU] + ["Q)QUIT"])
+        return ui.menu_bar([f"{k}) {cmd}" for k, cmd, _short in MENU] + ["Q) QUIT"])
 
     def chrome_rows(self) -> int:
         """How many rows the furniture eats: status bar, ticker, rule, menu,
@@ -327,12 +334,25 @@ class Terminal:
 
     def screen(self, function: str, *blocks: str) -> str:
         """Wrap content blocks in the standard screen: status bar, ticker,
-        tab bar (when more than one tab is open), body, menu."""
-        body = "\n".join(b for b in blocks if b)
+        tab bar (when more than one tab is open), body, menu.
+
+        The body is trimmed to what the window can actually hold.  Without
+        this a long screen scrolls the status bar and menu off the top, which
+        defeats the point of having them - so anything that does not fit is
+        cut and the last line says how much was dropped.
+        """
+        body_lines = "\n".join(b for b in blocks if b).split("\n")
+        budget = max(3, ui.height() - self.chrome_rows())
+        if len(body_lines) > budget:
+            dropped = len(body_lines) - budget + 1
+            body_lines = body_lines[:budget - 1]
+            body_lines.append(C.dim(
+                f"... {dropped} more rows - make the window taller, "
+                f"or use --rows to ask for fewer"))
         parts = [self.status_bar(function), self.ticker_strip()]
         if len(self.tabs) > 1:
             parts.append(ui.tab_bar([(t[0], t[1]) for t in self.tabs], self.active_tab))
-        parts += [ui.rule(), body, self.menu_bar()]
+        parts += [ui.rule(), "\n".join(body_lines), self.menu_bar()]
         return ui.paint("\n".join(parts))
 
     def repl(self) -> None:
@@ -390,14 +410,22 @@ class Terminal:
         g = self.graph
         week = self.week
         w = ui.width()
-        left_w = (w - 2) // 2
-        right_w = w - 2 - left_w
-        # Split the window between the two rows of panels so the dashboard
-        # fills whatever height the terminal has.  Each panel spends 3 rows on
+        narrow = ui.is_narrow()
+        # Side by side on a wide window; stacked full-width on a narrow one.
+        left_w = w if narrow else (w - 2) // 2
+        right_w = w if narrow else w - 2 - left_w
+        # Split the window between the rows of panels so the dashboard fills
+        # whatever height the terminal has.  Each panel spends about 3 rows on
         # its title and column headers, so the rest is data.
         avail = self.body_rows(panel_chrome=1)
-        top_h = max(6, avail // 2)
-        bottom_h = max(6, avail - top_h - 1)
+        if narrow:
+            # Stacked, so the two panels share the height end to end and the
+            # bottom pair is dropped entirely - four panels will not fit.
+            top_h = max(6, avail // 2)
+            bottom_h = max(6, avail - top_h)
+        else:
+            top_h = max(6, avail // 2)
+            bottom_h = max(6, avail - top_h - 1)
         top_rows, bottom_rows = max(3, top_h - 3), max(3, bottom_h - 3)
 
         # --- top-left: biggest movers.  With no news yet the board would be
@@ -481,9 +509,52 @@ class Terminal:
         games_panel = ui.fill(ui.panel(f"WEEK {week} - GAMES",
                                        [games, C.dim(f"BYE: {byes or 'none'}")], right_w), bottom_h)
 
+        if narrow:
+            # On a narrow window show the two panels that carry the most
+            # information and drop the rest rather than squeezing everything.
+            return self.screen("HOME", movers_panel, plays_panel)
         top = ui.columns([movers_panel, feed_panel], [left_w, right_w])
         bottom = ui.columns([plays_panel, games_panel], [left_w, right_w])
         return self.screen("HOME", top, "", bottom)
+
+    # ---------------- screen size --------------------------------------
+    def cmd_SIZE(self, args, opts):
+        """SIZE [cols rows | AUTO]      show or force the screen size"""
+        if args and args[0].upper() == "AUTO":
+            DISPLAY["WIDTH"] = "auto"
+            DISPLAY["HEIGHT"] = "auto"
+            return C.amber("size back to automatic - it now follows the window")
+        if len(args) >= 2 and is_number(args[0]) and is_number(args[1]):
+            DISPLAY["WIDTH"] = int(args[0])
+            DISPLAY["HEIGHT"] = int(args[1])
+            return C.amber(f"screen fixed at {args[0]} x {args[1]}  (SIZE AUTO to undo)")
+        if len(args) == 1 and is_number(args[0]):
+            DISPLAY["WIDTH"] = int(args[0])
+            return C.amber(f"width fixed at {args[0]}  (SIZE AUTO to undo)")
+
+        cols, rows, src, real_c, real_r = ui.detected_size()
+        lines = [
+            ui.kv("USING", C.white(f"{cols} x {rows}")) + "     " +
+            ui.kv("TERMINAL", C.white(f"{real_c} x {real_r}")),
+            ui.kv("SOURCE", C.dim(src)),
+            ui.kv("LAYOUT", C.amber("NARROW - panels stacked") if ui.is_narrow()
+                  else C.green("WIDE - panels side by side")),
+            "",
+        ]
+        if cols != real_c or rows != real_r:
+            lines.append(C.red("These do not match, so the screen will not fit."))
+            lines.append(C.dim("SIZE AUTO makes it follow the window again."))
+        elif ui.is_narrow():
+            lines.append(C.dim("Widen the window past 104 columns and the dashboard"))
+            lines.append(C.dim("switches to side-by-side panels with more on screen."))
+        else:
+            lines.append(C.dim("Everything fits. Drag the window bigger for more rows."))
+        lines += ["",
+                  C.white("SIZE 140 45") + C.dim("   force a size"),
+                  C.white("SIZE AUTO") + C.dim("     follow the window again"),
+                  C.dim("If the numbers are wrong, your terminal is not reporting its"),
+                  C.dim("size. Resizing the window once usually fixes that.")]
+        return self.screen("SIZE", ui.panel("SCREEN SIZE", lines))
 
     # ---------------- tabs ---------------------------------------------
     def cmd_TAB(self, args, opts):
@@ -634,8 +705,9 @@ class Terminal:
         team = g.teams.get(n.team)
         status = C.green("ACTIVE") if n.status == "ACTIVE" else C.red(n.status)
         w = ui.width()
-        left_w = (w - 2) // 2
-        right_w = w - 2 - left_w
+        narrow = ui.is_narrow()
+        left_w = w if narrow else (w - 2) // 2
+        right_w = w if narrow else w - 2 - left_w
 
         # --- quote block: two label/value pairs per line (label amber, value white)
         sep = "     "
@@ -719,8 +791,9 @@ class Terminal:
         olu = g.nodes[team.ol_node_id]
         dst = g.nodes.get(team.dst_node_id)
         w = ui.width()
-        left_w = (w - 2) * 3 // 5
-        right_w = w - 2 - left_w
+        narrow = ui.is_narrow()
+        left_w = w if narrow else (w - 2) * 3 // 5
+        right_w = w if narrow else w - 2 - left_w
 
         head = [ui.kv("OFFENSE", ui.fmt_num(S.projected_season(g, off), 2) + " " + ui.fmt_chg(off.season_delta)) + "   " +
                 ui.kv("O-LINE", ui.fmt_num(S.projected_season(g, olu), 2) + " " + ui.fmt_chg(olu.season_delta)) + "   " +

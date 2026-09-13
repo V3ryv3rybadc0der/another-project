@@ -94,17 +94,50 @@ class C:
 # geometry
 # ---------------------------------------------------------------------------
 def width() -> int:
-    """Screen width.  DISPLAY["WIDTH"] = "auto" follows the terminal window
-    (min 100), or set a fixed number."""
+    """Screen width in columns.
+
+    "auto" follows the real terminal window.  The floor is deliberately low
+    (MIN_WIDTH) rather than a comfortable 100: drawing wider than the window
+    makes every single line wrap, which looks far worse than a narrow layout.
+    Screens adapt instead - see is_narrow().
+    """
     w = DISPLAY["WIDTH"]
     if os.environ.get("FFT_WIDTH"):          # env override, handy for screenshots
         return int(os.environ["FFT_WIDTH"])
     if w == "auto":
         try:
-            return max(100, shutil.get_terminal_size((120, 40)).columns)
+            return max(MIN_WIDTH, shutil.get_terminal_size((120, 40)).columns)
         except Exception:
             return 120
     return int(w)
+
+
+# Below this the two-column screens stack into one column.
+NARROW_AT = 104
+# Hard floor.  Nothing sensible can be drawn below this.
+MIN_WIDTH = 56
+MIN_HEIGHT = 14
+
+
+def is_narrow() -> bool:
+    """True when the window is too tight for side-by-side panels."""
+    return width() < NARROW_AT
+
+
+def detected_size() -> tuple:
+    """(columns, lines, source) - what we think the terminal is and why.
+    Used by the SIZE command so a wrong guess can be seen and corrected."""
+    if os.environ.get("FFT_WIDTH") or os.environ.get("FFT_HEIGHT"):
+        src = "environment (FFT_WIDTH / FFT_HEIGHT)"
+    elif DISPLAY["WIDTH"] != "auto" or DISPLAY.get("HEIGHT", "auto") != "auto":
+        src = "fixed in config / SIZE command"
+    else:
+        src = "auto-detected from the terminal"
+    try:
+        real = shutil.get_terminal_size((120, 40))
+    except Exception:
+        real = (120, 40)
+    return width(), height(), src, real[0], real[1]
 
 
 def height() -> int:
@@ -115,7 +148,7 @@ def height() -> int:
         return int(os.environ["FFT_HEIGHT"])
     if h == "auto":
         try:
-            return max(24, shutil.get_terminal_size((120, 40)).lines)
+            return max(MIN_HEIGHT, shutil.get_terminal_size((120, 40)).lines)
         except Exception:
             return 40
     return int(h)
@@ -164,10 +197,15 @@ def clip(s: str, n: int) -> str:
 
 
 def paint(text: str, w: int = None) -> str:
-    """Give every line a black background all the way across the screen."""
+    """Give every line a black background all the way across the screen.
+
+    Also clips every line to the window width.  A line that runs past the
+    edge wraps onto the next row and pushes the rest of the screen down, so
+    clipping happens whether or not colour is switched on.
+    """
     w = w or width()
     if not _COLOR_ON:
-        return text
+        return "\n".join(clip(ln, w) for ln in text.split("\n"))
     black = f"\033[48;5;{THEME['black']}m"
     lines = []
     for ln in text.split("\n"):
@@ -215,8 +253,17 @@ def panel(title: str, lines: Iterable[str], w: int = None) -> str:
     return "\n".join(out)
 
 
-def columns(blocks: Sequence[str], widths: Sequence[int] = None, gap: int = 2) -> str:
-    """Put blocks of text side by side.  Each block is a string with newlines."""
+def columns(blocks: Sequence[str], widths: Sequence[int] = None, gap: int = 2,
+            stack_when_narrow: bool = True) -> str:
+    """Put blocks of text side by side.
+
+    On a narrow window side-by-side panels would be a few characters wide
+    each, so by default they stack vertically instead.  Pass
+    stack_when_narrow=False to force columns regardless.
+    """
+    blocks = [b for b in blocks if b is not None]
+    if stack_when_narrow and is_narrow():
+        return "\n".join(str(b).rstrip() for b in blocks)
     n = len(blocks)
     if widths is None:
         total = width() - gap * (n - 1)
@@ -265,13 +312,17 @@ def kv(label: str, value: str, label_w: int = 10) -> str:
 
 
 def menu_bar(items: Sequence[str]) -> str:
-    """Bottom function menu, e.g. ['1) HOME', '2) TICKER', ...] on a grey bar."""
+    """Bottom function menu on a grey bar.
+
+    Clipped to the window width: a menu that runs past the edge wraps onto a
+    second line and pushes the whole screen down by one row.
+    """
     w = width()
     body = "  ".join(items)
-    return bg("menu_bg", pad(" " + body, w), "menu_fg", bold=True)
+    return bg("menu_bg", pad(clip(" " + body, w), w), "menu_fg", bold=True)
 
 
-def tab_bar(tabs: Sequence[tuple], active: int) -> str:
+def tab_bar(tabs: Sequence[tuple], active: int) -> str:  # noqa: D401
     """[1 HOME] [2 TICKER] [3 ROSTER MYTEAM] with the active tab highlighted."""
     cells = []
     for i, (name, _cmd) in enumerate(tabs, start=1):
