@@ -365,6 +365,39 @@ class Recap:
         return sorted(self.box.items(), key=lambda kv: -kv[1]["points"])[:limit]
 
 
+def collect_day(games_list: List[Game], on_progress=None) -> Tuple[List[Recap], List[str]]:
+    """Build a Recap for every game that has started.
+
+    One network call per game, so it is the slowest thing in the program.
+    `on_progress(i, total, game)` is called before each fetch so the caller
+    can show something while it works.  A game that fails is skipped and
+    reported rather than killing the whole run.
+    """
+    recaps, errors = [], []
+    playable = [g for g in games_list if g.state in ("in", "post")]
+    for i, g in enumerate(playable, start=1):
+        if on_progress:
+            on_progress(i, len(playable), g)
+        try:
+            recaps.append(build_recap(fetch_summary(g.id), g))
+        except (FeedError, ValueError, KeyError) as e:
+            errors.append(f"{g.label}: {e}")
+    return recaps, errors
+
+
+def day_leaders(recaps: List[Recap], limit: int = 25) -> List[Tuple[str, str, dict]]:
+    """Every player who scored across the whole slate, best first.
+
+    Returns [(name, team, {points, line}), ...]
+    """
+    rows = []
+    for r in recaps:
+        for (name, team), rec in r.box.items():
+            rows.append((name, team, rec))
+    rows.sort(key=lambda t: -t[2]["points"])
+    return rows[:limit]
+
+
 def build_recap(summary: dict, fallback: Optional[Game] = None) -> Recap:
     """Assemble a Recap from one game's summary payload."""
     game = parse_game_state(summary, fallback)

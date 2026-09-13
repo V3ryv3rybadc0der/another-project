@@ -65,18 +65,30 @@ class GraphTests(unittest.TestCase):
         self.assertIsNone(S.projected_week(self.g, mahomes, self.g.teams["KC"].bye_week))
 
     def test_signing_star_wr_lifts_qb_and_shifts_depth(self):
-        higgins = self.node("Tee Higgins")
-        burrow = self.node("Joe Burrow")
-        fields = self.node("Justin Fields")
-        old_nyj_wr1 = self.g.players_at("NYJ", "WR")[0]
-        self.t.run_line("NEWS ADD tee higgins SIGNED NYJ --depth 1")
-        self.assertEqual(higgins.team, "NYJ")
-        self.assertEqual(higgins.depth, 1)
-        self.assertEqual(old_nyj_wr1.depth, 2)
-        self.assertGreater(fields.season_delta, 0, "new QB gains from a star WR")
-        self.assertLess(burrow.season_delta, 0, "old QB loses his WR2")
-        # the star arriving takes targets from the old WR1
-        self.assertLess(old_nyj_wr1.season_delta, 0)
+        """Signing a star receiver lifts his new QB and costs his old one.
+
+        Deliberately looks up who plays where rather than naming players:
+        rosters change every time the data is synced, and a test that
+        hardcodes them fails for reasons that have nothing to do with the
+        behaviour being checked.
+        """
+        star = self.node("Tee Higgins")
+        old_team, new_team = star.team, "NYJ"
+        if old_team == new_team:                      # he already plays there
+            new_team = next(t for t in self.g.teams if t != old_team)
+        old_qb = self.g.players_at(old_team, "QB")[0]
+        new_qb = self.g.players_at(new_team, "QB")[0]
+        incumbent_wr1 = self.g.players_at(new_team, "WR")[0]
+
+        self.t.run_line(f"NEWS ADD tee higgins SIGNED {new_team} --depth 1")
+
+        self.assertEqual(star.team, new_team)
+        self.assertEqual(star.depth, 1)
+        self.assertEqual(incumbent_wr1.depth, 2, "the incumbent slides down a slot")
+        self.assertGreater(new_qb.season_delta, 0, "new QB gains from a star WR")
+        self.assertLess(old_qb.season_delta, 0, "old QB loses a receiver")
+        # the star arriving takes targets from the receiver he displaced
+        self.assertLess(incumbent_wr1.season_delta, 0)
 
     def test_undo_restores_base_state(self):
         base = {nid: S.projected_season(self.g, n) for nid, n in self.g.nodes.items()}

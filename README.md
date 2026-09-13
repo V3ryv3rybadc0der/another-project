@@ -110,6 +110,7 @@ the standard library.
 | `TRADE <a> <players> FOR <b> <players>` | Price a swap for both sides. Nothing moves. |
 | `SCORES [--date YYYYMMDD]` | Every NFL game and its score. |
 | `RECAP <team> [--date] [--ai]` | What happened in a finished game and what it means. |
+| `RESULTS [--date YYYYMMDD]` | The whole slate: every score, who went off league-wide, and who got hurt. |
 | `QUIT` | Leave. |
 
 Typing a bare menu number (`0`-`9`) jumps to that screen.  Names are fuzzy and case-insensitive: `PLAYER mahomes`, `NEWS ADD purdy OUT`.
@@ -361,11 +362,34 @@ arrival is stored as a `Contribution` with its full path, which is what
 | `defenses.csv` | `team,vs_qb,vs_rb,vs_wr,vs_te,vs_k,dst_ppg` | points allowed per game to each position |
 | `schedule.csv` | `week,home,away` | bye = a week with no game |
 
-**The shipped data is SAMPLE data.**  Rosters are approximate for the 2025
-season and the stats, defensive numbers and schedule are illustrative, not
-official.  Replace the CSVs with real numbers (the loader does not care where
-they came from).  `python3 tools/make_sample_data.py` regenerates
-`defenses.csv` and `schedule.csv` from `teams.csv`.
+### Keeping the data honest
+
+Some of these files hold real data and some are still estimates. Know which:
+
+| File | Status |
+|---|---|
+| `schedule.csv` | **Real.** Pulled from ESPN, with real bye weeks. |
+| `players.csv` team column | **Real.** Synced from the live league. |
+| `players.csv` projections | Estimates. Replace with your own or your league's. |
+| `defenses.csv` | Generated from a 1-10 rating, not real points allowed. |
+| `teams.csv` ratings | Estimates. |
+
+Two tools keep the real half current:
+
+```bash
+python3 tools/fetch_real_schedule.py     # the real NFL schedule and byes
+python3 tools/sync_rosters.py --dry-run  # see which players have moved
+python3 tools/sync_rosters.py            # fix their team assignments
+```
+
+Run the roster sync every few weeks. Players move constantly, and a player
+listed on the wrong team draws the wrong opponent every week, which quietly
+poisons his matchup and his strength of schedule. The sync matches on name
+**and** position, refuses to guess when two players match, and leaves anyone
+it cannot find alone.
+
+`python3 tools/make_sample_data.py` regenerates the two estimated files if
+you want to start over from `teams.csv`.
 
 ---
 

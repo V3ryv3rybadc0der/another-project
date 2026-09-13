@@ -1042,6 +1042,78 @@ class Terminal:
             f"NFL SCOREBOARD - {done} of {len(games)} final",
             [t, "", C.dim("RECAP <team> tells you what happened in a finished game.")]))
 
+    def cmd_RESULTS(self, args, opts):
+        """RESULTS [--date YYYYMMDD]     the whole slate: scores and who went off"""
+        try:
+            slate = gamesmod.fetch_scoreboard(opts.get("date"))
+        except feeds.FeedError as e:
+            raise CommandError(str(e))
+        started = [g for g in slate if g.state in ("in", "post")]
+        if not started:
+            return self.screen("RESULTS", ui.panel("NO GAMES YET", [
+                C.dim("nothing has kicked off " + ("on that date" if opts.get("date") else "today")),
+                "", C.dim("SCORES shows the upcoming slate.")]))
+
+        print(C.dim(f"reading {len(started)} games..."), flush=True)
+        recaps, errors = gamesmod.collect_day(slate)
+
+        # --- the slate itself
+        grows = []
+        for r in recaps:
+            g = r.game
+            state = C.green("LIVE") if g.is_live else C.white("FINAL")
+            hurt = sum(1 for i in r.injuries if i["kind"] == "INJURED")
+            grows.append([state, C.white(g.away), f"{g.away_score}", C.dim("@"),
+                          C.white(g.home), f"{g.home_score}",
+                          C.dim(f"Q{g.period} {g.clock}" if g.is_live else "Final"),
+                          C.red(f"{hurt} hurt") if hurt else ""])
+        slate_panel = ui.panel(f"SLATE - {len(recaps)} games", [
+            ui.table(["", "AWAY", "", "", "HOME", "", "STATUS", ""], grows,
+                     ["<", "<", ">", "<", "<", ">", "<", "<"])])
+
+        # --- who went off, and whether you own them
+        g = self.graph
+        lrows = []
+        for name, team, rec in gamesmod.day_leaders(recaps, self.rows_opt(opts, 8)):
+            node, _why = ingest.resolve_player(g, name, team)
+            owned = rostermod.owners_of(self.rosters, node.id) if node else []
+            pre = node.base_value if node else None
+            vs = (rec["points"] - pre) if pre is not None else None
+            lrows.append([C.white(name[:22]), team,
+                          node.slot if node else C.dim("-"),
+                          f"{pre:.1f}" if pre is not None else C.dim("-"),
+                          C.white(f"{rec['points']:.1f}"),
+                          ui.fmt_chg(vs) if vs is not None else C.dim("-"),
+                          C.amber(",".join(owned)) if owned else "",
+                          C.dim(rec["line"][:38])])
+        leaders_panel = ui.panel("TOP FANTASY DAYS ACROSS THE SLATE", [
+            ui.table(["PLAYER", "TM", "SLOT", "PROJ", "ACTUAL", "VS PROJ", "ROSTER", "STAT LINE"],
+                     lrows, ["<", "<", "<", ">", ">", ">", "<", "<"])])
+
+        blocks = [slate_panel, leaders_panel]
+
+        # --- injuries across the whole day, tracked players first
+        hurt_rows = []
+        for r in recaps:
+            for inj in r.injuries:
+                if inj["kind"] != "INJURED":
+                    continue
+                node = gamesmod.match_abbrev_name(g, inj["hint"], inj["team"])
+                owned = rostermod.owners_of(self.rosters, node.id) if node else []
+                hurt_rows.append([
+                    C.dim(r.game.label), C.dim(inj["when"]), inj["team"],
+                    C.white(node.name) if node else C.dim(inj["hint"] + " (not tracked)"),
+                    C.amber(",".join(owned)) if owned else "",
+                ])
+        if hurt_rows:
+            hurt_rows.sort(key=lambda r: (ui.strip(r[3]).endswith("(not tracked)"),))
+            blocks.append(ui.panel(f"HURT TODAY - {len(hurt_rows)}", [
+                ui.table(["GAME", "WHEN", "TM", "PLAYER", "ROSTER"], hurt_rows), "",
+                C.dim("Nothing applied. FEED FETCH picks these up once the designation lands.")]))
+        for e in errors[:3]:
+            blocks.append(C.red("! " + str(e)[:100]))
+        return self.screen("RESULTS", *blocks)
+
     def cmd_RECAP(self, args, opts):
         """RECAP <team> [--date YYYYMMDD] [--ai]   what happened in a game and what it means"""
         if not args:
